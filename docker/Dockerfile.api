@@ -1,0 +1,26 @@
+FROM python:3.12-slim AS base
+WORKDIR /app
+RUN pip install --no-cache-dir uv
+
+FROM base AS deps
+COPY packages/api/pyproject.toml .
+RUN uv pip install --system --no-cache -e ".[dev]" 2>/dev/null || pip install --no-cache-dir fastapi[standard] uvicorn[standard] sqlalchemy[asyncio] asyncpg alembic pydantic-settings python-jose[cryptography] passlib[bcrypt] httpx langgraph langchain-core langchain-openai langchain-anthropic tiktoken redis prometheus-client opentelemetry-api opentelemetry-sdk opentelemetry-instrumentation-fastapi cryptography
+
+FROM deps AS runtime
+COPY packages/api /app/packages/api
+COPY packages/orchestration /app/packages/orchestration
+COPY packages/agents /app/packages/agents
+COPY packages/middleware /app/packages/middleware
+COPY packages/connectors /app/packages/connectors
+COPY packages/knowledge /app/packages/knowledge
+COPY packages/security /app/packages/security
+COPY packages/memory /app/packages/memory
+COPY packages/skills /app/packages/skills
+COPY packages/handoff /app/packages/handoff
+COPY packages/observability /app/packages/observability
+COPY packages/marketplace /app/packages/marketplace
+COPY packages/cdc /app/packages/cdc
+COPY packages/browser /app/packages/browser
+ENV PYTHONPATH=/app:/app/packages/api
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

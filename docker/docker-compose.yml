@@ -1,0 +1,63 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_ASYNC_URL: postgresql+asyncpg://nexusforge:nexusforge_secret@postgres:5432/nexusforge
+      DB_SYNC_URL: postgresql://nexusforge:nexusforge_secret@postgres:5432/nexusforge
+      REDIS_URL: redis://redis:6379/0
+      AUTH_SECRET_KEY: change-me-in-production-use-env-var
+      NEXUSFORGE_CORS_ORIGINS: '["http://localhost:3000","http://localhost:3001"]'
+      NEXUSFORGE_ENVIRONMENT: production
+    volumes:
+      - ../packages:/app/packages
+
+  webapp:
+    build:
+      context: ../packages/web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: nexusforge
+      POSTGRES_USER: nexusforge
+      POSTGRES_PASSWORD: nexusforge_secret
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexusforge -d nexusforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
