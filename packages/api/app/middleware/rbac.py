@@ -6,45 +6,52 @@ from starlette.responses import JSONResponse, Response
 
 from app.auth.jwt import TokenPayload, verify_token
 
-OPEN_PATHS = frozenset({"/", "/health", "/openapi.json", "/docs", "/redoc", "/metrics"})
+OPEN_PATHS = frozenset({"/", "/health", "/openapi.json", "/docs", "/redoc", "/metrics", "/login"})
 
 ROUTE_PERMISSIONS: dict[str, dict[str, list[str]]] = {
     "GET": {
-        "/api/v1/users": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/auth": ["owner", "admin", "editor", "viewer"],
         "/api/v1/agents": ["owner", "admin", "editor", "viewer"],
         "/api/v1/workflows": ["owner", "admin", "editor", "viewer"],
-        "/api/v1/knowledge-bases": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/knowledge": ["owner", "admin", "editor", "viewer"],
         "/api/v1/tools": ["owner", "admin", "editor", "viewer"],
-        "/api/v1/audit-logs": ["owner", "admin"],
+        "/api/v1/skills": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/memory": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/marketplace": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/audit": ["owner", "admin"],
+        "/api/v1/metrics": ["owner", "admin", "editor", "viewer"],
     },
     "POST": {
-        "/api/v1/users": ["owner", "admin"],
+        "/api/v1/auth": ["owner", "admin", "editor", "viewer"],
         "/api/v1/agents": ["owner", "admin", "editor"],
         "/api/v1/workflows": ["owner", "admin", "editor"],
-        "/api/v1/workflows/execute": ["owner", "admin", "editor"],
-        "/api/v1/knowledge-bases": ["owner", "admin", "editor"],
-        "/api/v1/tools": ["owner", "admin"],
+        "/api/v1/knowledge": ["owner", "admin", "editor"],
+        "/api/v1/tools": ["owner", "admin", "editor"],
+        "/api/v1/skills": ["owner", "admin", "editor"],
+        "/api/v1/memory": ["owner", "admin", "editor"],
+        "/api/v1/marketplace": ["owner", "admin"],
     },
     "PUT": {
-        "/api/v1/users": ["owner", "admin"],
         "/api/v1/agents": ["owner", "admin", "editor"],
         "/api/v1/workflows": ["owner", "admin", "editor"],
-        "/api/v1/knowledge-bases": ["owner", "admin", "editor"],
-        "/api/v1/tools": ["owner", "admin"],
+        "/api/v1/knowledge": ["owner", "admin", "editor"],
+        "/api/v1/tools": ["owner", "admin", "editor"],
+        "/api/v1/skills": ["owner", "admin", "editor"],
     },
     "PATCH": {
-        "/api/v1/users": ["owner", "admin"],
         "/api/v1/agents": ["owner", "admin", "editor"],
         "/api/v1/workflows": ["owner", "admin", "editor"],
-        "/api/v1/knowledge-bases": ["owner", "admin", "editor"],
-        "/api/v1/tools": ["owner", "admin"],
+        "/api/v1/knowledge": ["owner", "admin", "editor"],
+        "/api/v1/tools": ["owner", "admin", "editor"],
+        "/api/v1/skills": ["owner", "admin", "editor"],
     },
     "DELETE": {
-        "/api/v1/users": ["owner", "admin"],
         "/api/v1/agents": ["owner", "admin"],
         "/api/v1/workflows": ["owner", "admin"],
-        "/api/v1/knowledge-bases": ["owner", "admin"],
+        "/api/v1/knowledge": ["owner", "admin"],
         "/api/v1/tools": ["owner", "admin"],
+        "/api/v1/skills": ["owner", "admin"],
+        "/api/v1/marketplace": ["owner", "admin"],
     },
 }
 
