@@ -1,0 +1,16 @@
+FROM node:22-alpine
+
+RUN apk add --no-cache git bash \
+    && addgroup -S worker && adduser -S worker -G worker \
+    && npm install -g opencode-ai
+
+USER worker
+WORKDIR /workspace
+ENV HOME=/tmp
+
+# The API key and configuration exist only in /tmp, mounted as a tmpfs by the
+# caller. Do not mount the host OpenCode database into workers: current
+# OpenCode versions use it as mutable local state. The optional auth-json path
+# is retained for older installations, but the API-key configuration below is
+# the normal NexusForge path for OpenCode Zen.
+ENTRYPOINT ["/bin/sh", "-ec", "mkdir -p \"$HOME/.local/share/opencode\" \"$HOME/.config/opencode\"; if [ -n \"${OPENCODE_AUTH_JSON_B64:-}\" ]; then printf '%s' \"$OPENCODE_AUTH_JSON_B64\" | base64 -d > \"$HOME/.local/share/opencode/auth.json\"; chmod 600 \"$HOME/.local/share/opencode/auth.json\"; fi; if [ -n \"${NEXUSFORGE_OPENCODE_API_KEY:-}\" ] && [ -z \"${NEXUSFORGE_PROVIDER_CONFIGURED:-}\" ]; then cat > \"$HOME/.config/opencode/opencode.json\" <<'EOF'\n{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"opencode\": {\n      \"options\": {\"apiKey\": \"{env:NEXUSFORGE_OPENCODE_API_KEY}\"}\n    }\n  }\n}\nEOF\nfi; exec opencode run --format json --dir /workspace ${NEXUSFORGE_MODEL:+--model \"$NEXUSFORGE_MODEL\"} ${NEXUSFORGE_AGENT:+--agent \"$NEXUSFORGE_AGENT\"} \"$NEXUSFORGE_TASK_PROMPT\""]

@@ -19,6 +19,11 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+try:
+    from pgvector.sqlalchemy import Vector
+except ImportError:
+    Vector = None  # type: ignore[assignment,misc]
+
 from app.database import Base
 
 
@@ -30,6 +35,8 @@ class ExecutionStatus(str, enum.Enum):
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
     RETRYING = "retrying"
+    AWAITING_APPROVAL = "awaiting_approval"
+    NEEDS_REVIEW = "needs_review"
 
 
 class AgentType(str, enum.Enum):
@@ -76,12 +83,20 @@ class RiskLevel(str, enum.Enum):
     CRITICAL = "critical"
 
 
+class TaskPlanStatus(str, enum.Enum):
+    DRAFT = "draft"
+    AWAITING_APPROVAL = "awaiting_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     plan: Mapped[str] = mapped_column(String(50), default="free")
     settings: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -90,11 +105,11 @@ class Tenant(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
 
-    users: Mapped[list[User]] = relationship("User", back_populates="tenant", lazy="selectin")
-    agents: Mapped[list[Agent]] = relationship("Agent", back_populates="tenant", lazy="selectin")
-    workflows: Mapped[list[Workflow]] = relationship("Workflow", back_populates="tenant", lazy="selectin")
+    users: Mapped[list[User]] = relationship("User", back_populates="tenant", lazy="noload")
+    agents: Mapped[list[Agent]] = relationship("Agent", back_populates="tenant", lazy="noload")
+    workflows: Mapped[list[Workflow]] = relationship("Workflow", back_populates="tenant", lazy="noload")
     knowledge_bases: Mapped[list[KnowledgeBase]] = relationship(
-        "KnowledgeBase", back_populates="tenant", lazy="selectin"
+        "KnowledgeBase", back_populates="tenant", lazy="noload"
     )
 
     __table_args__ = (
@@ -110,14 +125,14 @@ class User(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
-    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.VIEWER)
+    role: Mapped[UserRole] = mapped_column(Enum(UserRole, values_callable=lambda e: [m.value for m in e]), default=UserRole.VIEWER)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False)
-    api_key: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True, index=True)
+    api_key: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -142,7 +157,7 @@ class Agent(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    agent_type: Mapped[AgentType] = mapped_column(Enum(AgentType), default=AgentType.LLM)
+    agent_type: Mapped[AgentType] = mapped_column(Enum(AgentType, values_callable=lambda e: [m.value for m in e]), default=AgentType.LLM)
     model_config: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
     system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tools: Mapped[Optional[dict]] = mapped_column(JSONB, default=list)
@@ -211,7 +226,7 @@ class Workflow(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    status: Mapped[WorkflowStatus] = mapped_column(Enum(WorkflowStatus), default=WorkflowStatus.DRAFT)
+    status: Mapped[WorkflowStatus] = mapped_column(Enum(WorkflowStatus, values_callable=lambda e: [m.value for m in e]), default=WorkflowStatus.DRAFT)
     graph_config: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
     agents: Mapped[Optional[dict]] = mapped_column(JSONB, default=list)
     edges: Mapped[Optional[dict]] = mapped_column(JSONB, default=list)
@@ -247,7 +262,7 @@ class WorkflowRun(Base):
         UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
     )
     status: Mapped[ExecutionStatus] = mapped_column(
-        Enum(ExecutionStatus), default=ExecutionStatus.PENDING
+        Enum(ExecutionStatus, values_callable=lambda e: [m.value for m in e]), default=ExecutionStatus.PENDING
     )
     input_data: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
     output_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
@@ -281,7 +296,7 @@ class AgentExecution(Base):
         UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[ExecutionStatus] = mapped_column(
-        Enum(ExecutionStatus), default=ExecutionStatus.PENDING
+        Enum(ExecutionStatus, values_callable=lambda e: [m.value for m in e]), default=ExecutionStatus.PENDING
     )
     input_data: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
     output_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
@@ -367,13 +382,13 @@ class AuditLog(Base):
     tenant_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True
     )
-    action: Mapped[AuditAction] = mapped_column(Enum(AuditAction), nullable=False)
+    action: Mapped[AuditAction] = mapped_column(Enum(AuditAction, values_callable=lambda e: [m.value for m in e]), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
     resource_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     details: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     user_agent: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    risk_level: Mapped[RiskLevel] = mapped_column(Enum(RiskLevel), default=RiskLevel.LOW)
+    risk_level: Mapped[RiskLevel] = mapped_column(Enum(RiskLevel, values_callable=lambda e: [m.value for m in e]), default=RiskLevel.LOW)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped[Optional[User]] = relationship("User", back_populates="audit_logs")
@@ -409,3 +424,174 @@ class ChangeLog(Base):
         Index("ix_change_logs_changed_by", "changed_by"),
         Index("ix_change_logs_created_at", "created_at"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Collaborative coding runtime. These records deliberately keep the durable
+# execution truth in Postgres; Redis is only a wake-up/dispatch mechanism.
+# ---------------------------------------------------------------------------
+
+
+class Repository(Base):
+    __tablename__ = "repositories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    local_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    default_branch: Mapped[str] = mapped_column(String(255), default="main")
+    allowed_commands: Mapped[dict] = mapped_column(JSONB, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_repositories_tenant_name", "tenant_id", "name"),
+        Index("ix_repositories_tenant_path", "tenant_id", "local_path", unique=True),
+    )
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    repository_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), default="New software task")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_chat_messages_session_created", "session_id", "created_at"),)
+
+
+class SkillVersion(Base):
+    __tablename__ = "skill_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True
+    )
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    division: Mapped[str] = mapped_column(String(255), default="general")
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    source_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    embedding = mapped_column(Vector(1536), nullable=True) if Vector is not None else mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_skill_versions_slug_version", "slug", "version", unique=True),
+        Index("ix_skill_versions_active", "slug", "is_active"),
+    )
+
+
+class TaskPlan(Base):
+    __tablename__ = "task_plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    repository_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("repositories.id", ondelete="RESTRICT"), nullable=False
+    )
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[TaskPlanStatus] = mapped_column(Enum(TaskPlanStatus, values_callable=lambda e: [m.value for m in e]), default=TaskPlanStatus.AWAITING_APPROVAL)
+    plan_data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (Index("ix_task_plans_tenant_status", "tenant_id", "status"),)
+
+
+class TaskStep(Base):
+    __tablename__ = "task_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_plans.id", ondelete="CASCADE"), nullable=False
+    )
+    key: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    skill_slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    skill_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("skill_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    depends_on: Mapped[dict] = mapped_column(JSONB, default=list)
+    writes_code: Mapped[bool] = mapped_column(Boolean, default=False)
+    nexus_phase: Mapped[str] = mapped_column(String(50), default="build")
+    role: Mapped[str] = mapped_column(String(255), default="")
+    parallel_group: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    max_retries: Mapped[int] = mapped_column(Integer, default=3)
+    acceptance_criteria: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[ExecutionStatus] = mapped_column(Enum(ExecutionStatus, values_callable=lambda e: [m.value for m in e]), default=ExecutionStatus.PENDING)
+    output: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_task_steps_plan_key", "plan_id", "key", unique=True),)
+
+
+class RunEvent(Base):
+    __tablename__ = "run_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), default="system")
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_run_events_run_sequence", "run_id", "sequence", unique=True),)
+
+
+class RunArtifact(Base):
+    __tablename__ = "run_artifacts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="")
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_run_artifacts_run_kind", "run_id", "kind"),)

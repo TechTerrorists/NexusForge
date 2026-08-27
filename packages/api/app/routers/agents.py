@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from pydantic import BaseModel
 from uuid import uuid4
 from datetime import datetime
 
@@ -13,22 +13,24 @@ router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 
 
 class AgentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str
     description: str = ""
     agent_type: str = "llm"
     system_prompt: str = ""
-    model_config: dict = {}
+    agent_model_config: dict = {}
     tools: list = []
     skills: list = []
     parameters: dict = {}
 
 
 class AgentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str | None = None
     description: str | None = None
     agent_type: str | None = None
     system_prompt: str | None = None
-    model_config: dict | None = None
+    agent_model_config: dict | None = None
     tools: list | None = None
     skills: list | None = None
     parameters: dict | None = None
@@ -36,12 +38,13 @@ class AgentUpdate(BaseModel):
 
 
 class AgentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     id: str
     name: str
     description: str
     agent_type: str
     system_prompt: str
-    model_config: dict
+    agent_model_config: dict
     tools: list
     skills: list
     is_active: bool
@@ -61,7 +64,7 @@ async def create_agent(
         description=req.description,
         agent_type=AgentType(req.agent_type),
         system_prompt=req.system_prompt,
-        model_config=req.model_config,
+        model_config=req.agent_model_config,
         tools=req.tools,
         skills=req.skills,
         parameters=req.parameters,
@@ -74,7 +77,7 @@ async def create_agent(
     return AgentResponse(
         id=str(agent.id), name=agent.name, description=agent.description,
         agent_type=agent.agent_type.value, system_prompt=agent.system_prompt or "",
-        model_config=agent.model_config or {}, tools=agent.tools or [],
+        agent_model_config=agent.model_config or {}, tools=agent.tools or [],
         skills=agent.skills or [], is_active=agent.is_active, version=agent.version,
         created_at=agent.created_at.isoformat(), updated_at=agent.updated_at.isoformat(),
     )
@@ -98,7 +101,7 @@ async def list_agents(
         AgentResponse(
             id=str(a.id), name=a.name, description=a.description,
             agent_type=a.agent_type.value, system_prompt=a.system_prompt or "",
-            model_config=a.model_config or {}, tools=a.tools or [],
+            agent_model_config=a.model_config or {}, tools=a.tools or [],
             skills=a.skills or [], is_active=a.is_active, version=a.version,
             created_at=a.created_at.isoformat(), updated_at=a.updated_at.isoformat(),
         )
@@ -121,7 +124,7 @@ async def get_agent(
     return AgentResponse(
         id=str(agent.id), name=agent.name, description=agent.description,
         agent_type=agent.agent_type.value, system_prompt=agent.system_prompt or "",
-        model_config=agent.model_config or {}, tools=agent.tools or [],
+        agent_model_config=agent.model_config or {}, tools=agent.tools or [],
         skills=agent.skills or [], is_active=agent.is_active, version=agent.version,
         created_at=agent.created_at.isoformat(), updated_at=agent.updated_at.isoformat(),
     )
@@ -147,8 +150,8 @@ async def update_agent(
         agent.agent_type = AgentType(req.agent_type)
     if req.system_prompt is not None:
         agent.system_prompt = req.system_prompt
-    if req.model_config is not None:
-        agent.model_config = req.model_config
+    if req.agent_model_config is not None:
+        agent.model_config = req.agent_model_config
     if req.tools is not None:
         agent.tools = req.tools
     if req.skills is not None:
@@ -164,7 +167,7 @@ async def update_agent(
     return AgentResponse(
         id=str(agent.id), name=agent.name, description=agent.description,
         agent_type=agent.agent_type.value, system_prompt=agent.system_prompt or "",
-        model_config=agent.model_config or {}, tools=agent.tools or [],
+        agent_model_config=agent.model_config or {}, tools=agent.tools or [],
         skills=agent.skills or [], is_active=agent.is_active, version=agent.version,
         created_at=agent.created_at.isoformat(), updated_at=agent.updated_at.isoformat(),
     )

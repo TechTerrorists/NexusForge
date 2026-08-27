@@ -40,6 +40,14 @@ class OllamaSettings(LLMProviderSettings):
     base_url: str = Field(default="http://localhost:11434")
 
 
+class OpenCodeLLMSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="NEXUSFORGE_OPENCODE_", extra="ignore")
+
+    api_key: SecretStr = Field(default=SecretStr(""))
+    model: str = Field(default="")
+    base_url: str = Field(default="https://opencode.ai/zen/v1")
+
+
 class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DB_", extra="ignore")
 
@@ -134,6 +142,7 @@ class Settings(BaseSettings):
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+    opencode_llm: OpenCodeLLMSettings = Field(default_factory=OpenCodeLLMSettings)
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

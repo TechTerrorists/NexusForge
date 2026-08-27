@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import Response
 
-from app.database import async_session_factory, init_engine
+import app.database as _db
 from app.models import AuditAction, AuditLog, RiskLevel
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+logger = logging.getLogger(__name__)
 
 
 class AuditMiddleware(BaseHTTPMiddleware):
@@ -32,21 +39,18 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
         duration_ms = int((time.monotonic() - start_time) * 1000)
 
-        try:
-            await self._write_audit_log(
-                request_id=request_id,
-                action=action,
-                resource_type=resource_type,
-                resource_id=self._extract_resource_id(request.url.path),
-                ip_address=client_ip,
-                user_agent=user_agent,
-                status_code=response.status_code,
-                method=request.method,
-                path=request.url.path,
-                duration_ms=duration_ms,
-            )
-        except Exception:
-            pass
+        asyncio.create_task(self._write_audit_log(
+            request_id=request_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=self._extract_resource_id(request.url.path),
+            ip_address=client_ip,
+            user_agent=user_agent,
+            status_code=response.status_code,
+            method=request.method,
+            path=request.url.path,
+            duration_ms=duration_ms,
+        ))
 
         response.headers["X-Request-ID"] = request_id
         return response
@@ -107,9 +111,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
         risk_level = RiskLevel.LOW
         if status_code >= 500:
             risk_level = RiskLevel.HIGH
-        elif status_code >= 400:
-            risk_level = RiskLevel.MEDIUM
-        elif action in (AuditAction.DELETE, AuditAction.EXECUTE):
+        elif status_code >= 400 or action in (AuditAction.DELETE, AuditAction.EXECUTE):
             risk_level = RiskLevel.MEDIUM
 
         audit_log = AuditLog(
@@ -126,12 +128,24 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 "status_code": status_code,
                 "duration_ms": duration_ms,
             },
-            created_at=datetime.now(timezone.utc),
+            # AuditLog.created_at is a PostgreSQL TIMESTAMP WITHOUT TIME ZONE.
+            # Keep the value in UTC, but naive, like the rest of the models.
+            created_at=datetime.now(UTC).replace(tzinfo=None),
         )
 
-        if async_session_factory is None:
-            init_engine()
+        if _db.async_session_factory is None:
+            _db.init_engine()
 
-        async with async_session_factory()() as session:  # type: ignore[union-attr]
-            session.add(audit_log)
-            await session.commit()
+        try:
+            async with _db.async_session_factory() as session:
+                session.add(audit_log)
+                await session.commit()
+        except Exception:
+            # Auditing must never break an otherwise successful API request or
+            # leak an unhandled task exception into the event loop.
+            logger.exception(
+                "Failed to write audit log for %s %s (request_id=%s)",
+                method,
+                path,
+                request_id,
+            )

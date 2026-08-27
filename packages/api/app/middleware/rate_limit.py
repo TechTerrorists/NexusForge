@@ -45,9 +45,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(
         self,
         app: object,
-        anon_limit: int = 10,
-        mutating_limit: int = 30,
-        read_limit: int = 120,
+        anon_limit: int = 30,
+        mutating_limit: int = 60,
+        read_limit: int = 600,
         window_seconds: float = 60.0,
     ) -> None:
         super().__init__(app)  # type: ignore[arg-type]
@@ -92,6 +92,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if request.url.path in ("/health", "/metrics", "/docs", "/redoc", "/openapi.json"):
+            return await call_next(request)
+
+        if request.method == "OPTIONS":
             return await call_next(request)
 
         self._cleanup_expired()

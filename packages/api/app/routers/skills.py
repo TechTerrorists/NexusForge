@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -6,10 +9,44 @@ from uuid import uuid4
 from datetime import datetime
 
 from ..database import get_db
-from ..models import Skill, User, UserRole
+from ..models import Skill, SkillVersion, User, UserRole
+from packages.task_runtime.skill_import import discover_skills
 from ..auth.dependencies import get_current_active_user, require_role
 
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
+
+
+class ImportRequest(BaseModel):
+    source_path: str | None = None
+
+
+def _source_path(req: ImportRequest) -> Path:
+    configured = req.source_path or os.getenv("NEXUSFORGE_AGENCY_AGENTS_PATH")
+    if not configured:
+        raise HTTPException(status_code=422, detail="Set NEXUSFORGE_AGENCY_AGENTS_PATH or provide source_path")
+    return Path(configured)
+
+
+@router.post("/import/preview")
+async def preview_import(req: ImportRequest, db: AsyncSession = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN, UserRole.OWNER))):
+    discovered = discover_skills(_source_path(req))
+    existing = {row.slug: row.source_hash for row in (await db.scalars(select(SkillVersion).where(SkillVersion.is_active.is_(True)))).all()}
+    return {"count": len(discovered), "skills": [{"slug": item.slug, "name": item.name, "division": item.division, "status": "unchanged" if existing.get(item.slug) == item.source_hash else "new_or_changed"} for item in discovered]}
+
+
+@router.post("/import")
+async def import_skills(req: ImportRequest, db: AsyncSession = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN, UserRole.OWNER))):
+    imported = 0
+    for item in discover_skills(_source_path(req)):
+        current = await db.scalar(select(SkillVersion).where(SkillVersion.slug == item.slug, SkillVersion.is_active.is_(True)))
+        if current is not None and current.source_hash == item.source_hash:
+            continue
+        if current is not None:
+            current.is_active = False
+        version = (current.version + 1) if current is not None else 1
+        db.add(SkillVersion(slug=item.slug, name=item.name, description=item.description, division=item.division, prompt=item.prompt, source_path=item.source_path, source_hash=item.source_hash, version=version))
+        imported += 1
+    return {"imported": imported}
 
 
 class SkillCreate(BaseModel):

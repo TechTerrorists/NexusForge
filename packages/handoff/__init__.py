@@ -1,6 +1,7 @@
 from .dispatcher import HandoffDispatcher
 from .queues import QueueManager
 from .cancellation import CooperativeCancellation
+from .redis_streams import RedisMessageBus, AgentMessage
 from .types import (
     HandoffMessage,
     LaneName,
@@ -16,6 +17,8 @@ __all__ = [
     "HandoffDispatcher",
     "QueueManager",
     "CooperativeCancellation",
+    "RedisMessageBus",
+    "AgentMessage",
     "HandoffMessage",
     "LaneName",
     "ProcessResult",

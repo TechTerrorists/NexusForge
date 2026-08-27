@@ -1,356 +1,159 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import {
-  Send,
-  PanelLeftClose,
-  PanelLeft,
-  Bot,
-  User,
-  Loader2,
-  Trash2,
-  Copy,
-  Check,
-} from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { Bot, Check, FolderGit2, Loader2, Send, User } from "lucide-react";
+import { api, Repository, TaskPlan } from "@/lib/nexus";
+import DynamicPlanView from "./DynamicPlanView";
+import AgentCommunication from "./AgentCommunication";
 
-interface Message {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  timestamp: Date;
-  status?: "sending" | "streaming" | "done" | "error";
-}
-
-const DEMO_MESSAGES: Message[] = [
-  {
-    id: "m1",
-    role: "user",
-    content: "Can you analyze the sales data from last quarter?",
-    timestamp: new Date(Date.now() - 300000),
-    status: "done",
-  },
-  {
-    id: "m2",
-    role: "assistant",
-    content:
-      "I'll analyze the Q4 sales data for you. Let me query the database and prepare a summary.\n\n**Key Findings:**\n- Total revenue: $2.4M (12% QoQ)\n- Top product: Enterprise Plan (42% of revenue)\n- Best region: North America (38% of sales)\n- New customer acquisition: 847 accounts\n\nWould you like me to drill down into any specific area?",
-    timestamp: new Date(Date.now() - 295000),
-    status: "done",
-  },
-  {
-    id: "m3",
-    role: "user",
-    content: "Break down the Enterprise Plan performance by vertical.",
-    timestamp: new Date(Date.now() - 280000),
-    status: "done",
-  },
-  {
-    id: "m4",
-    role: "assistant",
-    content:
-      "Here's the Enterprise Plan breakdown by vertical:\n\n- FinTech: $420K (+18%)\n- Healthcare: $312K (+24%)\n- SaaS: $285K (+9%)\n- Manufacturing: $198K (+15%)\n\nFinTech remains the strongest vertical. Healthcare shows the highest growth rate, driven by the new HIPAA-compliant features launched in November.",
-    timestamp: new Date(Date.now() - 275000),
-    status: "done",
-  },
-];
-
-const STREAM_RESPONSE =
-  "I'm processing your request. This is a demo response from the NexusForge chat interface. In production, this would stream tokens from the configured LLM provider via Server-Sent Events.";
+type Message = { id: string; role: "user" | "assistant"; content: string };
 
 export default function ChatPanel() {
-  const [messages, setMessages] = useState<Message[]>(DEMO_MESSAGES);
+  const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [repositoryId, setRepositoryId] = useState("");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [plan, setPlan] = useState<TaskPlan | null>(null);
   const [input, setInput] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [showRegistration, setShowRegistration] = useState(false);
+  const [repoName, setRepoName] = useState("");
+  const [repoPath, setRepoPath] = useState("");
+  const [repoBranch, setRepoBranch] = useState("main");
+  const [registering, setRegistering] = useState(false);
+  const [runId, setRunId] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    api<Repository[]>("/api/v1/repositories").then((items) => {
+      setRepositories(items);
+      if (items[0]) setRepositoryId(items[0].id);
+    }).catch((reason) => setError(reason.message));
+  }, []);
 
-  const sendMessage = () => {
-    if (!input.trim() || isStreaming) return;
-
-    const userMessage: Message = {
-      id: `m${Date.now()}`,
-      role: "user",
-      content: input.trim(),
-      timestamp: new Date(),
-      status: "done",
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
-    setIsStreaming(true);
-
-    const assistantId = `m${Date.now() + 1}`;
-    const assistantMessage: Message = {
-      id: assistantId,
-      role: "assistant",
-      content: "",
-      timestamp: new Date(),
-      status: "streaming",
-    };
-
-    setMessages((prev) => [...prev, assistantMessage]);
-
-    let currentContent = "";
-    const chars = STREAM_RESPONSE.split("");
-    let i = 0;
-
-    const streamInterval = setInterval(() => {
-      if (i < chars.length) {
-        const chunk = chars.slice(i, i + 3).join("");
-        currentContent += chunk;
-        i += 3;
-
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, content: currentContent } : m
-          )
-        );
-      } else {
-        clearInterval(streamInterval);
-        setIsStreaming(false);
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, status: "done" } : m
-          )
-        );
-      }
-    }, 20);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  };
+  }, [messages, plan]);
 
-  const copyMessage = (id: string, content: string) => {
-    navigator.clipboard.writeText(content);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
+  async function ensureSession() {
+    if (sessionId) return sessionId;
+    if (!repositoryId) throw new Error("Register and select a repository first.");
+    const session = await api<{ id: string }>("/api/v1/chat/sessions", {
+      method: "POST", body: JSON.stringify({ repository_id: repositoryId, title: "Software task" }),
+    });
+    setSessionId(session.id);
+    return session.id;
+  }
 
-  const clearChat = () => {
-    setMessages([]);
-  };
+  async function registerRepository(event: FormEvent) {
+    event.preventDefault();
+    if (!repoName.trim() || !repoPath.trim() || registering) return;
+    setRegistering(true); setError("");
+    try {
+      const repository = await api<Repository>("/api/v1/repositories", {
+        method: "POST",
+        body: JSON.stringify({
+          name: repoName.trim(),
+          local_path: repoPath.trim(),
+          default_branch: repoBranch.trim() || "main",
+          allowed_commands: [],
+        }),
+      });
+      setRepositories((items) => [...items, repository]);
+      setRepositoryId(repository.id);
+      setSessionId(null); setPlan(null);
+      setRepoName(""); setRepoPath(""); setRepoBranch("main");
+      setShowRegistration(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to register repository");
+    } finally { setRegistering(false); }
+  }
 
-  return (
-    <div className="flex h-full">
-      {sidebarOpen && (
-        <div
-          className="w-56 shrink-0 flex flex-col"
-          style={{
-            borderRight: "1px solid var(--border-subtle)",
-            background: "var(--bg-canvas)",
-          }}
-        >
-          <div
-            className="flex items-center justify-between px-3 py-2.5"
-            style={{ borderBottom: "1px solid var(--border-subtle)" }}
-          >
-            <h3 className="text-[13px] font-medium">Sessions</h3>
-            <button
-              onClick={() => setSidebarOpen(false)}
-              className="p-1 rounded hover:bg-white/5"
-            >
-              <PanelLeftClose size={14} style={{ color: "var(--fg-muted)" }} />
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-            <div
-              className="px-2.5 py-1.5 rounded text-[13px] font-medium cursor-pointer"
-              style={{
-                background: "rgba(110,161,240,0.1)",
-                color: "var(--blue-4)",
-                borderLeft: "2px solid var(--blue-4)",
-              }}
-            >
-              Sales Data Analysis
-            </div>
-            {["Code Review Session", "Support Ticket Triage", "Research: Market Trends"].map(
-              (name) => (
-                <div
-                  key={name}
-                  className="px-2.5 py-1.5 text-[13px] rounded cursor-pointer hover:bg-white/5"
-                  style={{ color: "var(--fg-muted)" }}
-                >
-                  {name}
-                </div>
-              )
-            )}
-          </div>
-          <div className="p-2" style={{ borderTop: "1px solid var(--border-subtle)" }}>
-            <button className="btn primary w-full justify-center text-[13px]">
-              + New Chat
-            </button>
-          </div>
-        </div>
-      )}
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!input.trim() || loading) return;
+    const content = input.trim();
+    setMessages((items) => [...items, { id: `local-${Date.now()}`, role: "user", content }]);
+    setInput(""); setError(""); setLoading(true);
+    try {
+      const id = await ensureSession();
+      const response = await api<{ message: string; plan: TaskPlan }>(`/api/v1/chat/sessions/${id}/messages`, {
+        method: "POST", body: JSON.stringify({ content }),
+      });
+      setMessages((items) => [...items, { id: `assistant-${Date.now()}`, role: "assistant", content: response.message }]);
+      setPlan(response.plan);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to create plan");
+    } finally { setLoading(false); }
+  }
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <div
-          className="flex items-center justify-between px-4 py-2.5 shrink-0"
-          style={{ borderBottom: "1px solid var(--border-subtle)" }}
-        >
-          <div className="flex items-center gap-2">
-            {!sidebarOpen && (
-              <button
-                onClick={() => setSidebarOpen(true)}
-                className="p-1 rounded hover:bg-white/5"
-              >
-                <PanelLeft size={16} style={{ color: "var(--fg-muted)" }} />
-              </button>
-            )}
-            <h3 className="text-[13px] font-medium">Sales Data Analysis</h3>
-          </div>
-          <button
-            onClick={clearChat}
-            className="p-1 rounded hover:bg-white/5"
-            style={{ color: "var(--fg-muted)" }}
-            title="Clear chat"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
+  async function decide(approved: boolean) {
+    if (!plan) return;
+    setLoading(true); setError("");
+    try {
+      const response = await api<{ status: string; run_id?: string }>(`/api/v1/plans/${plan.id}/decision`, {
+        method: "POST", body: JSON.stringify({ approved }),
+      });
+      setPlan({ ...plan, status: response.status });
+      if (response.run_id) setRunId(response.run_id);
+      setMessages((items) => [...items, {
+        id: `decision-${Date.now()}`, role: "assistant",
+        content: approved ? `Team started in isolated worktrees. Track run ${response.run_id} from Live Runs.` : "Plan rejected. Send a revised task when you are ready.",
+      }]);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update plan"); }
+    finally { setLoading(false); }
+  }
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.map((message) => (
-            <div
-              key={message.id}
-              className={`flex gap-3 ${
-                message.role === "user" ? "justify-end" : ""
-              }`}
-            >
-              {message.role === "assistant" && (
-                <div
-                  className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center"
-                  style={{
-                    background: "var(--blue-1)",
-                    border: "1px solid var(--blue-2)",
-                  }}
-                >
-                  <Bot size={14} style={{ color: "var(--blue-4)" }} />
-                </div>
-              )}
-
-              <div
-                className="max-w-[70%] rounded-lg p-3 text-[13px] leading-relaxed"
-                style={{
-                  background:
-                    message.role === "user" ? "var(--blue-3)" : "var(--bg-elevated)",
-                  color:
-                    message.role === "user" ? "#0a0a0f" : "var(--fg-secondary)",
-                  border:
-                    message.role === "assistant"
-                      ? "1px solid var(--border-subtle)"
-                      : "none",
-                }}
-              >
-                <div className="whitespace-pre-wrap">
-                  {message.content}
-                  {message.status === "streaming" && (
-                    <span
-                      className="inline-block w-1.5 h-4 animate-pulse ml-0.5 align-text-bottom"
-                      style={{ background: "var(--blue-4)" }}
-                    />
-                  )}
-                </div>
-                <div
-                  className="flex items-center gap-2 mt-2 text-[11px]"
-                  style={{
-                    color:
-                      message.role === "user"
-                        ? "rgba(10,10,15,0.5)"
-                        : "var(--fg-muted)",
-                  }}
-                >
-                  <span suppressHydrationWarning>
-                    {message.timestamp.toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </span>
-                  {message.role === "assistant" && message.status === "done" && (
-                    <button
-                      onClick={() => copyMessage(message.id, message.content)}
-                      className="hover:opacity-100 opacity-50 transition-opacity"
-                    >
-                      {copiedId === message.id ? (
-                        <Check size={12} />
-                      ) : (
-                        <Copy size={12} />
-                      )}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {message.role === "user" && (
-                <div
-                  className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center"
-                  style={{ background: "var(--bg-overlay)" }}
-                >
-                  <User size={14} style={{ color: "var(--fg-muted)" }} />
-                </div>
-              )}
-            </div>
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
-
-        <div
-          className="p-4 shrink-0"
-          style={{ borderTop: "1px solid var(--border-subtle)" }}
-        >
-          <div className="flex items-end gap-2">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Type a message... (Shift+Enter for newline)"
-              rows={1}
-              className="flex-1 px-3 py-2 rounded-lg text-[13px] resize-none focus:outline-none focus:ring-1 max-h-32"
-              style={{
-                background: "var(--bg-elevated)",
-                border: "1px solid var(--border-default)",
-                color: "var(--fg-primary)",
-                minHeight: "40px",
-                ["--tw-ring-color" as string]: "var(--border-focus)",
-              }}
-              onInput={(e) => {
-                const target = e.target as HTMLTextAreaElement;
-                target.style.height = "auto";
-                target.style.height =
-                  Math.min(target.scrollHeight, 128) + "px";
-              }}
-            />
-            <button
-              onClick={sendMessage}
-              disabled={!input.trim() || isStreaming}
-              className="p-2 rounded-lg hover:opacity-90 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
-              style={{
-                background: "var(--blue-3)",
-                color: "#0a0a0f",
-              }}
-            >
-              {isStreaming ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <Send size={16} />
-              )}
-            </button>
-          </div>
-        </div>
+  return <div className="h-full flex flex-col max-w-5xl mx-auto w-full p-6 gap-4 overflow-hidden">
+    <header className="flex items-end justify-between gap-4 shrink-0">
+      <div><h1 className="text-xl font-semibold">AI Team</h1><p className="text-[13px]" style={{ color: "var(--fg-muted)" }}>Describe a software task. The manager proposes roles and dependencies before anything runs.</p></div>
+      <div className="flex items-end gap-2">
+        <label className="text-xs" style={{ color: "var(--fg-muted)" }}>Repository
+          <select aria-label="Repository" value={repositoryId} onChange={(event) => { setRepositoryId(event.target.value); setSessionId(null); setPlan(null); }} className="block mt-1 px-2 py-1.5 rounded" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)" }}>
+            <option value="">Select repository</option>{repositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.name}</option>)}
+          </select>
+        </label>
+        <button type="button" className="btn" onClick={() => setShowRegistration((value) => !value)}><FolderGit2 size={14} /> Register</button>
       </div>
+    </header>
+    {repositories.length === 0 && <div className="panel p-3 text-sm shrink-0" style={{ color: "var(--amber-4)" }}>No repository is registered yet. Register a local Git checkout below before assigning a task.</div>}
+    {showRegistration && <form onSubmit={registerRepository} className="panel p-4 space-y-3 shrink-0">
+      <div><div className="font-medium text-sm">Register local Git checkout</div><p className="text-xs mt-1" style={{ color: "var(--fg-muted)" }}>Use an absolute path inside the configured projects mount (the same path must be visible to the API container). The folder must already be a Git repository.</p></div>
+      <div className="grid gap-3 md:grid-cols-3">
+        <label className="text-xs" style={{ color: "var(--fg-muted)" }}>Name<input required value={repoName} onChange={(event) => setRepoName(event.target.value)} placeholder="My project" className="block w-full mt-1 rounded px-2 py-2 text-sm" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)" }} /></label>
+        <label className="text-xs md:col-span-2" style={{ color: "var(--fg-muted)" }}>Absolute path<input required value={repoPath} onChange={(event) => setRepoPath(event.target.value)} placeholder="/home/you/projects/my-project" className="block w-full mt-1 rounded px-2 py-2 text-sm" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)" }} /></label>
+      </div>
+      <div className="flex gap-2 items-end"><label className="text-xs" style={{ color: "var(--fg-muted)" }}>Default branch<input value={repoBranch} onChange={(event) => setRepoBranch(event.target.value)} className="block w-36 mt-1 rounded px-2 py-2 text-sm" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)" }} /></label><button className="btn primary" disabled={registering}>{registering ? <Loader2 className="animate-spin" size={14} /> : <FolderGit2 size={14} />} Register repository</button></div>
+    </form>}
+    <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-4 min-h-0">
+      <section className="panel p-4 min-h-[120px]">
+        {messages.length === 0 && <div className="grid place-items-center text-center py-8"><div><Bot size={28} className="mx-auto" style={{ color: "var(--blue-4)" }} /><p className="text-sm mt-2" style={{ color: "var(--fg-muted)" }}>I will staff the right specialists, show their workflow, and keep code changes isolated until you review them.</p></div></div>}
+        {messages.map((message) => <div key={message.id} className={`flex gap-2 ${message.role === "user" ? "justify-end" : ""}`}>
+          {message.role === "assistant" && <Bot size={18} style={{ color: "var(--blue-4)"}} />}
+          <div className="max-w-[75%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap" style={{ background: message.role === "user" ? "var(--blue-3)" : "var(--bg-elevated)", color: message.role === "user" ? "#0a0a0f" : "var(--fg-secondary)" }}>{message.content}</div>
+          {message.role === "user" && <User size={18} style={{ color: "var(--fg-muted)" }} />}
+        </div>)}
+      </section>
+      {plan && <section className="panel">
+        <div className="panel-head">
+          <span className="title">Proposed team plan</span>
+          <span className="badge amber">{plan.status.replaceAll("_", " ")}</span>
+        </div>
+        <div className="panel-body space-y-3">
+          <p className="text-sm">{plan.goal}</p>
+          <DynamicPlanView steps={plan.steps} goal={plan.goal} status={plan.status} />
+          {plan.status === "awaiting_approval" && <div className="flex gap-2 pt-2">
+            <button className="btn primary" disabled={loading} onClick={() => decide(true)}><Check size={14} /> Approve & start</button>
+            <button className="btn" disabled={loading} onClick={() => decide(false)}>Reject</button>
+          </div>}
+        </div>
+      </section>}
+      {runId && <AgentCommunication runId={runId} />}
+      {error && <p className="text-sm" style={{ color: "var(--red-4)" }}>{error}</p>}
     </div>
-  );
+    <form onSubmit={submit} className="flex gap-2 shrink-0"><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="e.g. Add a dark-mode regression test and fix any failures" className="flex-1 rounded p-3 text-sm" style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-default)" }} /> <button className="btn primary" disabled={loading || !input.trim()}>{loading ? <Loader2 className="animate-spin" size={16} /> : <Send size={16} />} Plan task</button></form>
+  </div>;
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import MetaData
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 convention = {
     "ix": "ix_%(column_0_label)s",
@@ -80,8 +83,10 @@ async def init_db() -> None:
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created/verified successfully")
     except Exception:
-        pass
+        logger.exception("Failed to create database tables")
+        raise
 
 
 

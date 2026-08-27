@@ -7,6 +7,7 @@ from starlette.responses import JSONResponse, Response
 from app.auth.jwt import TokenPayload, verify_token
 
 OPEN_PATHS = frozenset({"/", "/health", "/openapi.json", "/docs", "/redoc", "/metrics", "/login"})
+PUBLIC_API_PATHS = frozenset({"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/refresh"})
 
 ROUTE_PERMISSIONS: dict[str, dict[str, list[str]]] = {
     "GET": {
@@ -20,6 +21,13 @@ ROUTE_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "/api/v1/marketplace": ["owner", "admin", "editor", "viewer"],
         "/api/v1/audit": ["owner", "admin"],
         "/api/v1/metrics": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/overview": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/runs": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/repositories": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/chat": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/plans": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/workflow-graphs": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/settings": ["owner", "admin", "editor", "viewer"],
     },
     "POST": {
         "/api/v1/auth": ["owner", "admin", "editor", "viewer"],
@@ -30,8 +38,14 @@ ROUTE_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "/api/v1/skills": ["owner", "admin", "editor"],
         "/api/v1/memory": ["owner", "admin", "editor"],
         "/api/v1/marketplace": ["owner", "admin"],
+        "/api/v1/repositories": ["owner", "admin", "editor"],
+        "/api/v1/chat": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/plans": ["owner", "admin", "editor"],
+        "/api/v1/runs": ["owner", "admin", "editor"],
+        "/api/v1/workflow-graphs": ["owner", "admin", "editor"],
     },
     "PUT": {
+        "/api/v1/settings": ["owner", "admin", "editor"],
         "/api/v1/agents": ["owner", "admin", "editor"],
         "/api/v1/workflows": ["owner", "admin", "editor"],
         "/api/v1/knowledge": ["owner", "admin", "editor"],
@@ -60,6 +74,9 @@ class RBACMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         path = request.url.path
 
+        if request.method in ("OPTIONS", "HEAD"):
+            return await call_next(request)
+
         if path in OPEN_PATHS or path.startswith("/docs") or path.startswith("/redoc"):
             return await call_next(request)
 
@@ -67,6 +84,9 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if not path.startswith("/api/"):
+            return await call_next(request)
+
+        if path in PUBLIC_API_PATHS:
             return await call_next(request)
 
         auth_header = request.headers.get("authorization", "")

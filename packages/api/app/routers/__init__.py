@@ -8,6 +8,8 @@ from .marketplace import router as marketplace_router
 from .audit import router as audit_router
 from .metrics import router as metrics_router
 from .skills import router as skills_router
+from .tasks import router as tasks_router
+from .settings import router as settings_router
 
 all_routers = [
     auth_router,
@@ -20,4 +22,6 @@ all_routers = [
     audit_router,
     metrics_router,
     skills_router,
+    tasks_router,
+    settings_router,
 ]

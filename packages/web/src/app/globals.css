@@ -192,3 +192,51 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-default); }
+
+/* React Flow dark mode overrides */
+.react-flow__node { color: var(--fg-primary) !important; }
+.react-flow__node-input,
+.react-flow__node-output,
+.react-flow__node-default {
+  background: var(--bg-elevated) !important;
+  color: var(--fg-primary) !important;
+  border: 1px solid var(--border-default) !important;
+  border-radius: var(--r-2) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+.react-flow__node-input:hover,
+.react-flow__node-output:hover,
+.react-flow__node-default:hover {
+  background: var(--bg-overlay) !important;
+  border-color: var(--border-strong) !important;
+}
+.react-flow__handle {
+  width: 8px !important;
+  height: 8px !important;
+  background: var(--blue-4) !important;
+  border: 2px solid var(--bg-canvas) !important;
+}
+.react-flow__edge-path { stroke: var(--border-default) !important; }
+.react-flow__background { background: var(--bg-canvas) !important; }
+.react-flow__controls {
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: var(--r-2) !important;
+  overflow: hidden;
+}
+.react-flow__controls button {
+  background: var(--bg-elevated) !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--fg-secondary) !important;
+  fill: var(--fg-secondary) !important;
+}
+.react-flow__controls button:hover {
+  background: var(--bg-overlay) !important;
+}
+.react-flow__controls button svg { fill: var(--fg-secondary) !important; }
+.react-flow__minimap {
+  background: var(--bg-canvas) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: var(--r-2) !important;
+}
+.react-flow__attribution { background: transparent !important; }
+.react-flow__attribution a { color: var(--fg-muted) !important; }

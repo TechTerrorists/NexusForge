@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
-type RunStatus = "completed" | "running" | "queued" | "failed" | "cancelled";
+type RunStatus = string;
 
 interface Run {
   id: string;
@@ -20,12 +20,15 @@ interface RunsTableProps {
 
 type SortKey = "id" | "workflow" | "status" | "duration" | "cost" | "createdAt";
 
-const STATUS_BADGE: Record<RunStatus, string> = {
+const STATUS_BADGE: Record<string, string> = {
   completed: "badge emerald",
   running: "badge blue",
   queued: "badge amber",
   failed: "badge red",
   cancelled: "badge",
+  pending: "badge amber",
+  awaiting_approval: "badge amber",
+  needs_review: "badge purple",
 };
 
 function parseDuration(s: string): number {
@@ -104,7 +107,7 @@ export default function RunsTable({ runs }: RunsTableProps) {
               <td className="name">{run.workflow}</td>
               <td>
                 <span className={STATUS_BADGE[run.status]}>
-                  ● {run.status}
+                  ● {run.status.replaceAll("_", " ")}
                 </span>
               </td>
               <td className="num" style={{ color: "var(--fg-muted)" }}>{run.duration}</td>

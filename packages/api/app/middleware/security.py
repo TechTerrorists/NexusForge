@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
 
 PII_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")),
@@ -62,10 +64,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                             },
                         )
 
-                    sanitized_body = self._redact_pii(json_body)
-                    sanitized_bytes = json.dumps(sanitized_body).encode("utf-8")
-
-                    request._body = sanitized_bytes  # type: ignore[attr-defined]
+                    # Preserve a redacted copy for observability without
+                    # changing the payload consumed by route handlers. UUIDs,
+                    # emails, and other valid application data can resemble
+                    # PII patterns and must not be silently corrupted.
+                    request.state.sanitized_body = self._redact_pii(json_body)
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     pass
 
@@ -74,7 +77,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
     def _analyze_request(self, data: Any) -> str:
         if isinstance(data, dict):
-            for key, value in data.items():
+            for value in data.values():
                 if isinstance(value, str):
                     risk = self._scan_text(value)
                     if risk == "high":

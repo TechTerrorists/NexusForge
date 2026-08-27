@@ -10,6 +10,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    env_file:
+      - ../.env
     environment:
       DB_ASYNC_URL: postgresql+asyncpg://nexusforge:nexusforge_secret@postgres:5432/nexusforge
       DB_SYNC_URL: postgresql://nexusforge:nexusforge_secret@postgres:5432/nexusforge
@@ -18,8 +20,27 @@ services:
       NEXUSFORGE_CORS_ORIGINS: '["http://localhost:3000","http://localhost:3001"]'
       NEXUSFORGE_ENVIRONMENT: development
       NEXUSFORGE_DEBUG: "true"
+      # Keep this host path unchanged inside API and runner containers so the
+      # Docker daemon can bind the exact worktree it is asked to execute.
+      NEXUSFORGE_WORKTREE_ROOT: ${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}
+      NEXUSFORGE_RUNNER_IMAGE: nexusforge-opencode-runner:latest
+      NEXUSFORGE_RUNNER_MODE: ${NEXUSFORGE_RUNNER_MODE:-docker}
+      NEXUSFORGE_RUNNER_NETWORK: bridge
+      NEXUSFORGE_OPENCODE_MODEL: ${NEXUSFORGE_OPENCODE_MODEL:-}
+      NEXUSFORGE_OPENCODE_API_KEY: ${NEXUSFORGE_OPENCODE_API_KEY:-}
+      OPENCODE_AUTH_JSON_B64: ${OPENCODE_AUTH_JSON_B64:-}
+      NEXUSFORGE_AGENCY_AGENTS_PATH: /opt/agency-agents
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
     volumes:
       - ../packages:/app/packages
+      # Paths must be mounted at the SAME absolute locations the Docker daemon
+      # sees, because the API creates nested runner containers via its socket.
+      - ${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:rw
+      - ${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}:${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}:rw
+      - ${NEXUSFORGE_HOST_AGENCY_AGENTS:-../../agency-agents}:/opt/agency-agents:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   webapp:

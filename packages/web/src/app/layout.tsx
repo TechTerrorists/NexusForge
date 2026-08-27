@@ -1,8 +1,8 @@
 "use client";
 
 import "./globals.css";
-import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   Activity,
@@ -53,7 +53,18 @@ const NAV_GROUPS: NavGroup[] = [
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [dark, setDark] = useState(true);
+  const [authed, setAuthed] = useState(false);
+
+  useEffect(() => {
+    const token = localStorage.getItem("nf_token");
+    if (pathname !== "/login" && !token) {
+      router.push("/login");
+      return;
+    }
+    setAuthed(!!token);
+  }, [pathname, router]);
 
   const toggleTheme = () => {
     setDark((d) => {
@@ -62,6 +73,28 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       return next;
     });
   };
+
+  if (pathname === "/login") {
+    return (
+      <html lang="en" className="dark">
+        <body>
+          <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0f] text-gray-900 dark:text-gray-100">
+            {children}
+          </div>
+        </body>
+      </html>
+    );
+  }
+
+  if (!authed) {
+    return (
+      <html lang="en" className="dark">
+        <body>
+          <div className="min-h-screen bg-gray-50 dark:bg-[#0a0a0f]" />
+        </body>
+      </html>
+    );
+  }
 
   return (
     <html lang="en" className="dark">
