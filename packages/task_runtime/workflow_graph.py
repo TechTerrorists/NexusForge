@@ -7,8 +7,24 @@ from dataclasses import dataclass
 from typing import Any
 
 
-ALLOWED_NODE_TYPES = frozenset({"start", "task", "agent", "condition", "approval", "notification", "end"})
-WRITE_NODE_TYPES = frozenset({"notification"})
+ALLOWED_NODE_TYPES = frozenset(
+    {
+        "start",
+        "http_request",
+        "map",
+        "condition",
+        "foreach",
+        "approval",
+        "command",
+        "notification",
+        "llm",
+        "agent",
+        "end",
+        # Legacy visual nodes compile as deterministic mappings.
+        "task",
+    }
+)
+WRITE_NODE_TYPES = frozenset({"http_request", "command", "notification", "agent"})
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,21 @@ def validate_graph(graph: dict[str, Any]) -> list[str]:
         unreachable = set(types) - reachable
         if unreachable:
             errors.append(f"unreachable nodes: {', '.join(sorted(unreachable))}")
+    reverse: dict[str, list[str]] = defaultdict(list)
+    for source, targets in adjacency.items():
+        for target in targets:
+            reverse[target].append(source)
+    can_reach_end: set[str] = set()
+    queue = deque(ends)
+    while queue:
+        node_id = queue.popleft()
+        if node_id in can_reach_end:
+            continue
+        can_reach_end.add(node_id)
+        queue.extend(reverse[node_id])
+    dead_ends = set(types) - can_reach_end
+    if dead_ends:
+        errors.append(f"nodes without a path to end: {', '.join(sorted(dead_ends))}")
     indegree = {node_id: incoming[node_id] for node_id in types}
     queue = deque(node_id for node_id, value in indegree.items() if value == 0)
     visited = 0
@@ -87,6 +118,24 @@ def validate_graph(graph: dict[str, Any]) -> list[str]:
         predecessors = {edge.get("source") for edge in edges if edge.get("target") == node.get("id")}
         if not any(types.get(predecessor) == "approval" for predecessor in predecessors):
             errors.append(f"{node.get('type')} node '{node.get('id')}' requires a preceding approval node")
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data", {})
+        if node.get("type") == "foreach" and int(data.get("max_items", 0) or 0) not in range(1, 101):
+            errors.append(f"foreach node '{node.get('id')}' requires max_items between 1 and 100")
+        if node.get("type") == "http_request" and not data.get("allowed_domains"):
+            errors.append(f"http_request node '{node.get('id')}' requires an allowed_domains list")
+        if node.get("type") == "http_request" and str(data.get("method", "GET")).upper() not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}:
+            errors.append(f"http_request node '{node.get('id')}' uses an unsupported method")
+        if node.get("type") == "notification" and (not data.get("url") or not data.get("allowed_domains")):
+            errors.append(f"notification node '{node.get('id')}' requires url and allowed_domains")
+        if node.get("type") == "command" and (not isinstance(data.get("argv"), list) or not data.get("argv") or not all(isinstance(part, str) and part for part in data.get("argv", []))):
+            errors.append(f"command node '{node.get('id')}' requires an argv array")
+        if node.get("type") in {"llm", "agent"} and not str(data.get("prompt", "")).strip():
+            errors.append(f"{node.get('type')} node '{node.get('id')}' requires a prompt")
+        if node.get("type") == "agent" and not str(data.get("role", "")).strip():
+            errors.append(f"agent node '{node.get('id')}' requires a workforce role slug")
     return errors
 
 
@@ -98,15 +147,21 @@ def compile_graph(graph: dict[str, Any]) -> list[CompiledStep]:
     deps: dict[str, list[str]] = defaultdict(list)
     for edge in graph["edges"]:
         deps[edge["target"]].append(edge["source"])
+    edge_conditions: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for edge in graph["edges"]:
+        if isinstance(edge.get("data"), dict) and "when" in edge["data"]:
+            edge_conditions[edge["target"]].append(
+                {"source": edge["source"], "when": bool(edge["data"]["when"])}
+            )
     return [
         CompiledStep(
             key=node_id,
             title=str(node.get("data", {}).get("label") or node_id),
             node_type=str(node["type"]),
             depends_on=[dependency for dependency in deps[node_id] if nodes[dependency]["type"] != "start"],
-            config=dict(node.get("data", {})),
+            config={**dict(node.get("data", {})), "_incoming_conditions": edge_conditions[node_id]},
             requires_approval=node["type"] in {"approval", "notification"},
         )
         for node_id, node in nodes.items()
-        if node["type"] not in {"start", "end", "condition"}
+        if node["type"] not in {"start", "end"}
     ]

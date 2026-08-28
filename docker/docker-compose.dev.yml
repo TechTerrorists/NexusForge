@@ -23,6 +23,7 @@ services:
       # Keep this host path unchanged inside API and runner containers so the
       # Docker daemon can bind the exact worktree it is asked to execute.
       NEXUSFORGE_WORKTREE_ROOT: ${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}
+      NEXUSFORGE_PROJECTS_ROOT: ${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}
       NEXUSFORGE_RUNNER_IMAGE: nexusforge-opencode-runner:latest
       NEXUSFORGE_RUNNER_MODE: ${NEXUSFORGE_RUNNER_MODE:-docker}
       NEXUSFORGE_RUNNER_NETWORK: bridge
@@ -40,7 +41,6 @@ services:
       - ${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:rw
       - ${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}:${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}:rw
       - ${NEXUSFORGE_HOST_AGENCY_AGENTS:-../../agency-agents}:/opt/agency-agents:ro
-      - /var/run/docker.sock:/var/run/docker.sock
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   webapp:
@@ -55,6 +55,55 @@ services:
     volumes:
       - ../packages/web:/app
     command: sh -c "npm install --legacy-peer-deps && npm run dev"
+
+  # Build the immutable, non-root sandbox image as part of the normal stack.
+  # This one-shot service never handles tasks itself; the durable worker starts
+  # a fresh resource-limited container from the resulting image per agent step.
+  runner-image:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.runner
+    image: nexusforge-opencode-runner:latest
+    entrypoint: ["/bin/true"]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      runner-image:
+        condition: service_completed_successfully
+    env_file:
+      - ../.env
+    environment:
+      DB_ASYNC_URL: postgresql+asyncpg://nexusforge:nexusforge_secret@postgres:5432/nexusforge
+      DB_SYNC_URL: postgresql://nexusforge:nexusforge_secret@postgres:5432/nexusforge
+      REDIS_URL: redis://redis:6379/0
+      AUTH_SECRET_KEY: dev-secret-key-not-for-production
+      NEXUSFORGE_ENVIRONMENT: development
+      NEXUSFORGE_WORKTREE_ROOT: ${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}
+      NEXUSFORGE_PROJECTS_ROOT: ${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}
+      NEXUSFORGE_RUNNER_IMAGE: nexusforge-opencode-runner:latest
+      NEXUSFORGE_RUNNER_MODE: ${NEXUSFORGE_RUNNER_MODE:-docker}
+      NEXUSFORGE_RUNNER_NETWORK: bridge
+      NEXUSFORGE_OPENCODE_MODEL: ${NEXUSFORGE_OPENCODE_MODEL:-}
+      NEXUSFORGE_OPENCODE_API_KEY: ${NEXUSFORGE_OPENCODE_API_KEY:-}
+      OPENCODE_AUTH_JSON_B64: ${OPENCODE_AUTH_JSON_B64:-}
+      NEXUSFORGE_AGENCY_AGENTS_PATH: /opt/agency-agents
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
+    volumes:
+      - ../packages:/app/packages
+      - ${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:rw
+      - ${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}:${NEXUSFORGE_HOST_RUNS_ROOT:-/home/sunjeet/projects/nexusforge-runs}:rw
+      - ${NEXUSFORGE_HOST_AGENCY_AGENTS:-../../agency-agents}:/opt/agency-agents:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: ["python", "-m", "packages.task_runtime.worker"]
 
   postgres:
     image: pgvector/pgvector:pg16

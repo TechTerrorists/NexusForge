@@ -8,7 +8,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,8 @@ class OpenCodeResult:
     text: str
     events: list[dict]
     session_id: str | None = None
+    tokens_used: int = 0
+    cost_usd: float = 0.0
 
 
 class OpenCodeRunner:
@@ -39,27 +41,32 @@ class OpenCodeRunner:
         base_url: str | None = None,
         api_key: str | None = None,
         custom_provider: bool = False,
+        event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        mode: str | None = None,
     ) -> OpenCodeResult:
         selected_model = model or self.default_model
-        mode = os.getenv("NEXUSFORGE_RUNNER_MODE", "http")
-        if mode == "docker":
+        selected_mode = mode or os.getenv("NEXUSFORGE_RUNNER_MODE", "http")
+        if selected_mode == "docker":
             return await self._run_docker(
                 prompt=prompt, workdir=workdir, model=selected_model,
                 agent=agent, env_extras=env_extras, provider=provider,
                 adapter=adapter, base_url=base_url, api_key=api_key,
                 custom_provider=custom_provider,
+                event_sink=event_sink,
             )
-        if mode == "local":
+        if selected_mode == "local":
             return await self._run_local(
                 prompt=prompt, workdir=workdir, model=selected_model,
                 agent=agent, env_extras=env_extras, provider=provider,
                 adapter=adapter, base_url=base_url, api_key=api_key,
                 custom_provider=custom_provider,
+                event_sink=event_sink,
             )
         return await self._run_http(
             prompt=prompt, workdir=workdir, model=selected_model,
             agent=agent, adapter=adapter, base_url=base_url, api_key=api_key,
             custom_provider=custom_provider,
+            event_sink=event_sink,
         )
 
     async def _run_http(
@@ -73,6 +80,7 @@ class OpenCodeRunner:
         base_url: str | None,
         api_key: str | None,
         custom_provider: bool,
+        event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> OpenCodeResult:
         from app.config import get_settings
 
@@ -117,6 +125,7 @@ class OpenCodeRunner:
             text = "".join(
                 block.text for block in response.content if hasattr(block, "text")
             )
+            tokens_used = int(getattr(response.usage, "input_tokens", 0) or 0) + int(getattr(response.usage, "output_tokens", 0) or 0)
         else:
             import openai
 
@@ -131,8 +140,11 @@ class OpenCodeRunner:
                 max_tokens=8192,
             )
             text = response.choices[0].message.content or ""
+            tokens_used = int(getattr(response.usage, "total_tokens", 0) or 0) if response.usage else 0
         events = [{"type": "agent_output", "text": text, "agent": agent, "model": selected_model}]
-        return OpenCodeResult(text=text, events=events)
+        if event_sink:
+            await event_sink(events[0])
+        return OpenCodeResult(text=text, events=events, tokens_used=tokens_used, cost_usd=_response_cost(response))
 
     async def _run_local(
         self,
@@ -147,6 +159,7 @@ class OpenCodeRunner:
         base_url: str | None = None,
         api_key: str | None = None,
         custom_provider: bool = False,
+        event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> OpenCodeResult:
         configured_provider = bool(custom_provider and base_url and model)
         selected_model = f"nexusforge/{model}" if configured_provider else model
@@ -180,27 +193,22 @@ class OpenCodeRunner:
             env=safe_env,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+            events, text_parts, stderr = await asyncio.wait_for(
+                self._stream_process(process, event_sink),
+                timeout=self.timeout_seconds,
+            )
         except TimeoutError:
             process.kill()
             await process.wait()
             raise RuntimeError("OpenCode worker timed out")
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
         if process.returncode:
-            raise RuntimeError(stderr.decode("utf-8", "replace")[-2000:] or "OpenCode worker failed")
-        events: list[dict] = []
-        text_parts: list[str] = []
-        for line in stdout.decode("utf-8", "replace").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                text_parts.append(line)
-                continue
-            if isinstance(event, dict):
-                events.append(event)
-                text = event.get("text") or event.get("content")
-                if isinstance(text, str):
-                    text_parts.append(text)
-        return OpenCodeResult(text="\n".join(text_parts).strip(), events=events)
+            raise RuntimeError(stderr[-2000:] or "OpenCode worker failed")
+        tokens_used, cost_usd = _event_usage(events)
+        return OpenCodeResult(text="\n".join(text_parts).strip(), events=events, tokens_used=tokens_used, cost_usd=cost_usd)
 
     async def _run_docker(
         self,
@@ -215,15 +223,21 @@ class OpenCodeRunner:
         base_url: str | None = None,
         api_key: str | None = None,
         custom_provider: bool = False,
+        event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> OpenCodeResult:
         image = os.getenv("NEXUSFORGE_RUNNER_IMAGE", "nexusforge-opencode-runner:latest")
+        common_git = self._worktree_common_git_dir(workdir)
         command = [
             "docker", "run", "--rm", "--network", os.getenv("NEXUSFORGE_RUNNER_NETWORK", "none"),
             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--memory", os.getenv("NEXUSFORGE_RUNNER_MEMORY", "4g"), "--cpus", os.getenv("NEXUSFORGE_RUNNER_CPUS", "2"),
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m", "-v", f"{workdir}:/workspace:rw",
-            "-e", f"NEXUSFORGE_TASK_PROMPT={prompt}",
         ]
+        if common_git is not None:
+            # Git worktree links contain an absolute gitdir. Mount only the
+            # managed clone's metadata at that same path, never the source repo.
+            command.extend(["-v", f"{common_git}:{common_git}:rw"])
+        command.extend(["-e", f"NEXUSFORGE_TASK_PROMPT={prompt}"])
         for key in (
             "NEXUSFORGE_OPENCODE_API_KEY",
             "OPENCODE_AUTH_JSON_B64",
@@ -251,26 +265,68 @@ class OpenCodeRunner:
             *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.timeout_seconds)
+            events, text_parts, stderr = await asyncio.wait_for(
+                self._stream_process(process, event_sink),
+                timeout=self.timeout_seconds,
+            )
         except TimeoutError:
             process.kill()
             await process.wait()
             raise RuntimeError("OpenCode sandbox timed out")
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
         if process.returncode:
-            raise RuntimeError(stderr.decode("utf-8", "replace")[-2000:] or "OpenCode sandbox failed")
-        events: list[dict] = []
+            raise RuntimeError(stderr[-2000:] or "OpenCode sandbox failed")
+        tokens_used, cost_usd = _event_usage(events)
+        return OpenCodeResult(text="\n".join(text_parts).strip(), events=events, tokens_used=tokens_used, cost_usd=cost_usd)
+
+    def _worktree_common_git_dir(self, workdir: Path) -> Path | None:
+        dot_git = workdir / ".git"
+        if not dot_git.is_file():
+            return dot_git if dot_git.is_dir() else None
+        try:
+            value = dot_git.read_text().strip()
+        except OSError:
+            return None
+        if not value.startswith("gitdir: "):
+            return None
+        git_dir = Path(value.removeprefix("gitdir: ")).resolve()
+        if git_dir.parent.name != "worktrees":
+            return None
+        return git_dir.parent.parent
+
+    async def _stream_process(
+        self,
+        process: asyncio.subprocess.Process,
+        event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> tuple[list[dict[str, Any]], list[str], str]:
+        """Parse runner JSONL while it is produced instead of after exit."""
+        assert process.stdout is not None and process.stderr is not None
+        events: list[dict[str, Any]] = []
         text_parts: list[str] = []
-        for line in stdout.decode("utf-8", "replace").splitlines():
+
+        async def read_stderr() -> str:
+            return (await process.stderr.read()).decode("utf-8", "replace")
+
+        stderr_task = asyncio.create_task(read_stderr())
+        while line_bytes := await process.stdout.readline():
+            line = line_bytes.decode("utf-8", "replace").rstrip()
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
-                text_parts.append(line)
-                continue
-            if isinstance(event, dict):
-                events.append(event)
-                if isinstance(event.get("text") or event.get("content"), str):
-                    text_parts.append(event.get("text") or event.get("content"))
-        return OpenCodeResult(text="\n".join(text_parts).strip(), events=events)
+                event = {"type": "runner_output", "text": line}
+            if not isinstance(event, dict):
+                event = {"type": "runner_output", "value": event}
+            events.append(event)
+            if event_sink:
+                await event_sink(event)
+            content = event.get("text") or event.get("content")
+            if isinstance(content, str):
+                text_parts.append(content)
+        await process.wait()
+        return events, text_parts, await stderr_task
 
     def _provider_config(
         self,
@@ -301,3 +357,29 @@ class OpenCodeRunner:
 
 async def stream_container_events(*, image: str, worktree: Path, prompt_file: Path) -> AsyncIterator[dict]:
     yield {"event": "sandbox_prepared", "image": image, "worktree": str(worktree)}
+
+
+def _response_cost(response: Any) -> float:
+    for source in (getattr(response, "usage", None), getattr(response, "model_extra", None)):
+        if isinstance(source, dict) and isinstance(source.get("cost"), (int, float)):
+            return float(source["cost"])
+        value = getattr(source, "cost", None)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return 0.0
+
+
+def _event_usage(events: list[dict[str, Any]]) -> tuple[int, float]:
+    tokens, cost = 0, 0.0
+    for event in events:
+        usage = event.get("usage")
+        candidates = [usage, event] if isinstance(usage, dict) else [event]
+        for candidate in candidates:
+            for key in ("total_tokens", "tokens_used", "tokens"):
+                value = candidate.get(key)
+                if isinstance(value, (int, float)):
+                    tokens = max(tokens, int(value))
+            value = candidate.get("cost_usd", candidate.get("cost"))
+            if isinstance(value, (int, float)):
+                cost = max(cost, float(value))
+    return tokens, cost

@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   Activity,
-  Bot,
+  UsersRound,
   GitBranch,
   Database,
   Store,
@@ -18,6 +18,8 @@ import {
   Bell,
   ChevronDown,
   Zap,
+  FolderGit2,
+  Menu,
 } from "lucide-react";
 
 interface NavGroup {
@@ -27,25 +29,26 @@ interface NavGroup {
 
 const NAV_GROUPS: NavGroup[] = [
   {
-    label: "Observe",
+    label: "Mission control",
     items: [
-      { href: "/", label: "Overview", icon: <LayoutDashboard size={16} /> },
-      { href: "/runs", label: "Live Runs", icon: <Activity size={16} /> },
-      { href: "/agents", label: "Agents", icon: <Bot size={16} /> },
+      { href: "/", label: "Command Center", icon: <LayoutDashboard size={16} /> },
+      { href: "/chat", label: "Tasks", icon: <MessageSquare size={16} /> },
+      { href: "/runs", label: "Runs", icon: <Activity size={16} /> },
     ],
   },
   {
-    label: "Build",
+    label: "Operations",
     items: [
-      { href: "/workflows", label: "Workflows", icon: <GitBranch size={16} /> },
-      { href: "/knowledge", label: "Knowledge", icon: <Database size={16} /> },
-      { href: "/marketplace", label: "Marketplace", icon: <Store size={16} /> },
+      { href: "/agents", label: "Workforce", icon: <UsersRound size={16} /> },
+      { href: "/workflows", label: "Automations", icon: <GitBranch size={16} /> },
+      { href: "/repositories", label: "Repositories", icon: <FolderGit2 size={16} /> },
     ],
   },
   {
-    label: "Operate",
+    label: "System",
     items: [
-      { href: "/chat", label: "Chat", icon: <MessageSquare size={16} /> },
+      { href: "/knowledge", label: "Knowledge · Preview", icon: <Database size={16} /> },
+      { href: "/marketplace", label: "Marketplace · Preview", icon: <Store size={16} /> },
       { href: "/settings", label: "Settings", icon: <Settings size={16} /> },
     ],
   },
@@ -56,6 +59,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   const router = useRouter();
   const [dark, setDark] = useState(true);
   const [authed, setAuthed] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     const token = localStorage.getItem("nf_token");
@@ -101,7 +106,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <div className="flex h-screen bg-gray-50 dark:bg-[#0a0a0f] text-gray-900 dark:text-gray-100">
           {/* Sidebar */}
-          <aside className="w-56 shrink-0 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-[#0f0f17] flex flex-col">
+          {navOpen && <button aria-label="Close navigation overlay" className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={() => setNavOpen(false)} />}
+          <aside className={`mission-sidebar ${navOpen ? "open" : ""}`}>
             {/* Brand */}
             <div className="h-12 flex items-center gap-2 px-4 border-b border-gray-200 dark:border-gray-800">
               <div className="w-6 h-6 rounded bg-brand-600 flex items-center justify-center">
@@ -133,7 +139,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                           <span className={active ? "text-brand-500 dark:text-brand-400" : "text-gray-400 dark:text-gray-500"}>
                             {item.icon}
                           </span>
-                          {item.label}
+                          <span>{item.label.replace(" · Preview", "")}</span>
+                          {item.label.includes("Preview") && <span className="ml-auto text-[8px] uppercase tracking-wider" style={{ color: "var(--amber-4)" }}>Preview</span>}
                         </a>
                       );
                     })}
@@ -160,21 +167,28 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           {/* Main area */}
           <div className="flex-1 flex flex-col min-w-0">
             {/* Topbar */}
-            <header className="h-12 shrink-0 flex items-center gap-3 px-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-[#0f0f17]">
+            <header className="h-14 shrink-0 flex items-center gap-3 px-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-[#0f0f17]">
+              <button aria-label="Open navigation" className="p-2 lg:hidden" onClick={() => setNavOpen(true)}><Menu size={18} /></button>
               <div className="flex-1 max-w-md">
                 <div className="relative">
                   <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
                   <input
                     type="text"
                     placeholder="Search workflows, agents, runs..."
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" || !search.trim()) return;
+                      const match = NAV_GROUPS.flatMap((group) => group.items).find((item) => item.label.toLowerCase().includes(search.toLowerCase()));
+                      if (match) { router.push(match.href); setSearch(""); }
+                    }}
                     className="w-full pl-8 pr-3 py-1.5 border border-gray-200 dark:border-gray-700 rounded-md text-xs bg-gray-50 dark:bg-white/5 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500"
                   />
                 </div>
               </div>
               <div className="flex items-center gap-1">
-                <button className="relative p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-white/5 transition-colors">
+                <button className="relative p-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-white/5 transition-colors" title="No unread notifications" aria-label="Notifications">
                   <Bell size={16} className="text-gray-500 dark:text-gray-400" />
-                  <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-red-500 rounded-full" />
                 </button>
                 <button
                   onClick={toggleTheme}

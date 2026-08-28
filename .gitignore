@@ -15,6 +15,7 @@ env/
 # Node.js
 node_modules/
 .next/
+.next-codex/
 out/
 *.tsbuildinfo
 .turbo/

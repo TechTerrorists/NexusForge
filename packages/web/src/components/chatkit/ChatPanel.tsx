@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Bot, Check, FolderGit2, Loader2, Send, User } from "lucide-react";
+import { Bot, Check, FolderGit2, Loader2, Save, Send, SlidersHorizontal, User } from "lucide-react";
 import { api, Repository, TaskPlan } from "@/lib/nexus";
 import DynamicPlanView from "./DynamicPlanView";
 import AgentCommunication from "./AgentCommunication";
@@ -23,6 +23,7 @@ export default function ChatPanel() {
   const [repoBranch, setRepoBranch] = useState("main");
   const [registering, setRegistering] = useState(false);
   const [runId, setRunId] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -107,6 +108,39 @@ export default function ChatPanel() {
     finally { setLoading(false); }
   }
 
+  async function savePlan() {
+    if (!plan) return;
+    setLoading(true); setError("");
+    try {
+      const saved = await api<TaskPlan>(`/api/v1/plans/${plan.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          goal: plan.goal,
+          constraints: plan.constraints || {},
+          limits: plan.limits || {},
+          steps: plan.steps.map((step) => ({
+            id: step.id,
+            title: step.title,
+            instructions: step.instructions,
+            role_slug: step.role_slug || step.skill,
+            depends_on: step.depends_on,
+            writes_code: step.writes_code,
+            nexus_phase: step.nexus_phase,
+            role: step.role,
+            parallel_group: step.parallel_group,
+            max_retries: step.max_retries ?? 2,
+            acceptance_criteria: step.acceptance_criteria,
+            expected_artifacts: step.expected_artifacts || [],
+            tool_grants: step.tool_grants || [],
+            side_effect_class: step.side_effect_class || "workspace",
+          })),
+        }),
+      });
+      setPlan(saved); setEditing(false);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to save plan"); }
+    finally { setLoading(false); }
+  }
+
   return <div className="h-full flex flex-col max-w-5xl mx-auto w-full p-6 gap-4 overflow-hidden">
     <header className="flex items-end justify-between gap-4 shrink-0">
       <div><h1 className="text-xl font-semibold">AI Team</h1><p className="text-[13px]" style={{ color: "var(--fg-muted)" }}>Describe a software task. The manager proposes roles and dependencies before anything runs.</p></div>
@@ -140,11 +174,30 @@ export default function ChatPanel() {
       {plan && <section className="panel">
         <div className="panel-head">
           <span className="title">Proposed team plan</span>
-          <span className="badge amber">{plan.status.replaceAll("_", " ")}</span>
+          <div className="flex gap-2"><span className="badge amber">{plan.status.replaceAll("_", " ")}</span>{plan.status === "awaiting_approval" && <button className="btn sm" onClick={() => setEditing((value) => !value)}><SlidersHorizontal size={12} /> Edit plan</button>}</div>
         </div>
         <div className="panel-body space-y-3">
           <p className="text-sm">{plan.goal}</p>
           <DynamicPlanView steps={plan.steps} goal={plan.goal} status={plan.status} />
+          {editing && <div className="plan-editor">
+            <label className="detail-label">Shared goal<textarea className="field min-h-20" value={plan.goal} onChange={(event) => setPlan({ ...plan, goal: event.target.value })} /></label>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {Object.entries(plan.limits || {}).map(([key, value]) => <label className="detail-label" key={key}>{key.replaceAll("_", " ")}<input className="field" type="number" min="0" value={value} onChange={(event) => setPlan({ ...plan, limits: { ...(plan.limits || {}), [key]: Number(event.target.value) } })} /></label>)}
+            </div>
+            {plan.steps.map((step, index) => <div className="plan-editor-step" key={step.id}>
+              <div className="grid gap-3 lg:grid-cols-2"><label className="detail-label">Step title<input className="field" value={step.title} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item) })} /></label><label className="detail-label">Role slug<input className="field font-mono" value={step.role_slug || step.skill} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, role_slug: event.target.value } : item) })} /></label></div>
+              <label className="detail-label">Instructions<textarea className="field min-h-20" value={step.instructions} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, instructions: event.target.value } : item) })} /></label>
+              <label className="detail-label">Acceptance criteria<textarea className="field min-h-16" value={step.acceptance_criteria} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, acceptance_criteria: event.target.value } : item) })} /></label>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <label className="detail-label">Dependencies<input className="field font-mono" value={step.depends_on.join(", ")} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, depends_on: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) } : item) })} placeholder="step-1, step-2" /></label>
+                <label className="detail-label">Tool grants<input className="field font-mono" value={(step.tool_grants || []).join(", ")} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, tool_grants: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) } : item) })} /></label>
+                <label className="detail-label">Retry limit<input className="field" type="number" min="0" max="5" value={step.max_retries ?? 2} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, max_retries: Number(event.target.value) } : item) })} /></label>
+                <label className="detail-label">Side effects<select className="field" value={step.side_effect_class || "workspace"} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, side_effect_class: event.target.value } : item) })}><option value="read_only">Read only</option><option value="workspace">Workspace</option><option value="external">External</option><option value="privileged">Privileged</option></select></label>
+              </div>
+              <label className="flex items-center gap-2 text-xs" style={{ color: "var(--fg-secondary)" }}><input type="checkbox" checked={step.writes_code} onChange={(event) => setPlan({ ...plan, steps: plan.steps.map((item, itemIndex) => itemIndex === index ? { ...item, writes_code: event.target.checked } : item) })} /> This step must produce repository changes and requires the isolated Docker runner.</label>
+            </div>)}
+            <button className="btn primary" disabled={loading} onClick={savePlan}><Save size={13} /> Save plan changes</button>
+          </div>}
           {plan.status === "awaiting_approval" && <div className="flex gap-2 pt-2">
             <button className="btn primary" disabled={loading} onClick={() => decide(true)}><Check size={14} /> Approve & start</button>
             <button className="btn" disabled={loading} onClick={() => decide(false)}>Reject</button>

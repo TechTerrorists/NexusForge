@@ -28,6 +28,7 @@ ROUTE_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "/api/v1/plans": ["owner", "admin", "editor", "viewer"],
         "/api/v1/workflow-graphs": ["owner", "admin", "editor", "viewer"],
         "/api/v1/settings": ["owner", "admin", "editor", "viewer"],
+        "/api/v1/workforce": ["owner", "admin", "editor", "viewer"],
     },
     "POST": {
         "/api/v1/auth": ["owner", "admin", "editor", "viewer"],
@@ -43,6 +44,7 @@ ROUTE_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "/api/v1/plans": ["owner", "admin", "editor"],
         "/api/v1/runs": ["owner", "admin", "editor"],
         "/api/v1/workflow-graphs": ["owner", "admin", "editor"],
+        "/api/v1/workforce": ["owner", "admin"],
     },
     "PUT": {
         "/api/v1/settings": ["owner", "admin", "editor"],
@@ -53,6 +55,7 @@ ROUTE_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "/api/v1/skills": ["owner", "admin", "editor"],
     },
     "PATCH": {
+        "/api/v1/plans": ["owner", "admin", "editor"],
         "/api/v1/agents": ["owner", "admin", "editor"],
         "/api/v1/workflows": ["owner", "admin", "editor"],
         "/api/v1/knowledge": ["owner", "admin", "editor"],
@@ -87,6 +90,10 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if path in PUBLIC_API_PATHS:
+            return await call_next(request)
+
+        # Webhook triggers authenticate the raw body with their own HMAC key.
+        if request.method == "POST" and path.startswith("/api/v1/workflows/hooks/"):
             return await call_next(request)
 
         auth_header = request.headers.get("authorization", "")

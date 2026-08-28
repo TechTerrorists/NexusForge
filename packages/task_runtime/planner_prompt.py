@@ -17,6 +17,9 @@ class PlannedStepSchema(BaseModel):
     parallel_group: str | None = None
     max_retries: int = 3
     acceptance_criteria: str = ""
+    expected_artifacts: list[str] = []
+    tool_grants: list[str] = []
+    side_effect_class: str = "workspace"
 
     @field_validator("nexus_phase", mode="before")
     @classmethod
@@ -45,6 +48,15 @@ class PlannedStepSchema(BaseModel):
         if isinstance(v, str):
             return v
         return ""
+
+    @field_validator("expected_artifacts", "tool_grants", mode="before")
+    @classmethod
+    def coerce_string_list(cls, v: object) -> list[str]:
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        if isinstance(v, list):
+            return [str(item) for item in v]
+        return []
 
     @field_validator("depends_on", mode="before")
     @classmethod
@@ -76,7 +88,10 @@ Your job is to create an execution plan for the given task. Each step must use o
 5. Keep steps focused and atomic — one clear objective per step.
 6. If a step writes code, set writes_code to true.
 7. Provide acceptance_criteria describing what "done" looks like for each step.
+8. List expected_artifacts and the minimum tool_grants required by the step.
+9. Set side_effect_class to one of: read_only, workspace, external, privileged.
+10. Prefer parallel, independent work when it cannot create conflicting file writes.
 
 ## Response Format
-Return a JSON object with a "steps" array. Each step has: key, title, instructions, skill_slug, depends_on, writes_code, nexus_phase, role, parallel_group (optional), max_retries, acceptance_criteria.
+Return a JSON object with a "steps" array. Each step has: key, title, instructions, skill_slug, depends_on, writes_code, nexus_phase, role, parallel_group (optional), max_retries, acceptance_criteria, expected_artifacts, tool_grants, side_effect_class.
 """

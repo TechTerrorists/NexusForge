@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from pydantic import BaseModel
+from sqlalchemy import or_, select
+from pydantic import BaseModel, Field
 from uuid import uuid4
 from datetime import datetime
 
@@ -17,7 +17,8 @@ class ToolCreate(BaseModel):
     description: str = ""
     tool_type: str = "function"
     endpoint_url: str | None = None
-    auth_config: dict = {}
+    auth_config: dict = Field(default_factory=dict)
+    permission_policy: dict = Field(default_factory=dict)
     rate_limit: int = 100
 
 
@@ -27,6 +28,7 @@ class ToolUpdate(BaseModel):
     tool_type: str | None = None
     endpoint_url: str | None = None
     auth_config: dict | None = None
+    permission_policy: dict | None = None
     rate_limit: int | None = None
     is_active: bool | None = None
 
@@ -39,6 +41,7 @@ class ToolResponse(BaseModel):
     endpoint_url: str | None
     rate_limit: int
     is_active: bool
+    permission_policy: dict
     created_at: str
     updated_at: str
 
@@ -51,7 +54,8 @@ async def create_tool(
     tool = ToolDefinition(
         id=uuid4(), name=req.name, description=req.description,
         tool_type=req.tool_type, endpoint_url=req.endpoint_url,
-        auth_config=req.auth_config, rate_limit=req.rate_limit,
+        tenant_id=user.tenant_id, auth_config=req.auth_config,
+        permission_policy=req.permission_policy, rate_limit=req.rate_limit,
     )
     db.add(tool)
     await db.commit()
@@ -59,20 +63,20 @@ async def create_tool(
     return ToolResponse(
         id=str(tool.id), name=tool.name, description=tool.description or "",
         tool_type=tool.tool_type, endpoint_url=tool.endpoint_url,
-        rate_limit=tool.rate_limit, is_active=tool.is_active,
+        rate_limit=tool.rate_limit, is_active=tool.is_active, permission_policy=tool.permission_policy or {},
         created_at=tool.created_at.isoformat(), updated_at=tool.updated_at.isoformat(),
     )
 
 
 @router.get("/", response_model=list[ToolResponse])
 async def list_tools(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_active_user)):
-    result = await db.execute(select(ToolDefinition).order_by(ToolDefinition.created_at.desc()))
+    result = await db.execute(select(ToolDefinition).where(or_(ToolDefinition.tenant_id.is_(None), ToolDefinition.tenant_id == user.tenant_id)).order_by(ToolDefinition.created_at.desc()))
     tools = result.scalars().all()
     return [
         ToolResponse(
             id=str(t.id), name=t.name, description=t.description or "",
             tool_type=t.tool_type, endpoint_url=t.endpoint_url,
-            rate_limit=t.rate_limit, is_active=t.is_active,
+            rate_limit=t.rate_limit, is_active=t.is_active, permission_policy=t.permission_policy or {},
             created_at=t.created_at.isoformat(), updated_at=t.updated_at.isoformat(),
         )
         for t in tools
@@ -81,14 +85,14 @@ async def list_tools(db: AsyncSession = Depends(get_db), user: User = Depends(ge
 
 @router.get("/{tool_id}", response_model=ToolResponse)
 async def get_tool(tool_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_active_user)):
-    result = await db.execute(select(ToolDefinition).where(ToolDefinition.id == tool_id))
+    result = await db.execute(select(ToolDefinition).where(ToolDefinition.id == tool_id, or_(ToolDefinition.tenant_id.is_(None), ToolDefinition.tenant_id == user.tenant_id)))
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
     return ToolResponse(
         id=str(tool.id), name=tool.name, description=tool.description or "",
         tool_type=tool.tool_type, endpoint_url=tool.endpoint_url,
-        rate_limit=tool.rate_limit, is_active=tool.is_active,
+        rate_limit=tool.rate_limit, is_active=tool.is_active, permission_policy=tool.permission_policy or {},
         created_at=tool.created_at.isoformat(), updated_at=tool.updated_at.isoformat(),
     )
 
@@ -99,7 +103,7 @@ async def update_tool(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role(UserRole.EDITOR, UserRole.ADMIN, UserRole.OWNER)),
 ):
-    result = await db.execute(select(ToolDefinition).where(ToolDefinition.id == tool_id))
+    result = await db.execute(select(ToolDefinition).where(ToolDefinition.id == tool_id, ToolDefinition.tenant_id == user.tenant_id))
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")
@@ -111,14 +115,14 @@ async def update_tool(
     return ToolResponse(
         id=str(tool.id), name=tool.name, description=tool.description or "",
         tool_type=tool.tool_type, endpoint_url=tool.endpoint_url,
-        rate_limit=tool.rate_limit, is_active=tool.is_active,
+        rate_limit=tool.rate_limit, is_active=tool.is_active, permission_policy=tool.permission_policy or {},
         created_at=tool.created_at.isoformat(), updated_at=tool.updated_at.isoformat(),
     )
 
 
 @router.delete("/{tool_id}", status_code=204)
 async def delete_tool(tool_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(require_role(UserRole.ADMIN, UserRole.OWNER))):
-    result = await db.execute(select(ToolDefinition).where(ToolDefinition.id == tool_id))
+    result = await db.execute(select(ToolDefinition).where(ToolDefinition.id == tool_id, ToolDefinition.tenant_id == user.tenant_id))
     tool = result.scalar_one_or_none()
     if not tool:
         raise HTTPException(status_code=404, detail="Tool not found")

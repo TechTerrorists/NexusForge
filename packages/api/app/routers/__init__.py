@@ -10,6 +10,7 @@ from .metrics import router as metrics_router
 from .skills import router as skills_router
 from .tasks import router as tasks_router
 from .settings import router as settings_router
+from .workforce import router as workforce_router
 
 all_routers = [
     auth_router,
@@ -24,4 +25,5 @@ all_routers = [
     skills_router,
     tasks_router,
     settings_router,
+    workforce_router,
 ]

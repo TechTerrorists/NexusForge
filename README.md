@@ -1,268 +1,113 @@
 # NexusForge
 
-AI-Powered Enterprise Multi-Agent Workflow Orchestration Platform
+NexusForge is a production-shaped hackathon project for running trustworthy AI software teams and low-cost deterministic automations.
 
-## Quick Start
+The current product can plan a repository task, staff ephemeral agents from versioned role templates, execute approved work in managed Git clones and isolated worktrees, persist a typed activity ledger, collect changes and checks for review, and merge only after a separate explicit command. It also supports versioned deterministic workflows with manual, timezone-aware cron, and signed-webhook triggers.
 
-### Prerequisites
-- Docker & Docker Compose
-- Python 3.12+
-- Node.js 20+
+Knowledge, Marketplace, remote execution, and enterprise connectors are Preview or internal packages; they are not advertised as operational product features.
 
-### Development Setup
+## Execution model
 
-```bash
-# Clone and start
-cd nexusforge
-docker compose -f docker/docker-compose.dev.yml up -d
-
-# API available at http://localhost:8000
-# Frontend available at http://localhost:3000
-# API docs at http://localhost:8000/docs
+```text
+Browser mission control
+        │ REST + resumable SSE
+        ▼
+FastAPI control plane ───────► PostgreSQL (authoritative ledger)
+        │                              ▲
+        │ queues durable jobs          │ leases, events, artifacts
+        ▼                              │
+Dedicated worker ◄──────────── Redis wake-ups/messages (optional)
+        │
+        ├── deterministic typed nodes (zero LLM tokens unless explicit)
+        │
+        └── managed clone → per-agent worktrees → integration branch
+                                │
+                                ▼
+                      non-root Docker agent sandbox
 ```
 
-### Manual Setup (without Docker)
+PostgreSQL owns plans, runs, immutable workflow versions, jobs, agent instances, messages, delegations, node runs, events, artifacts, usage, and approvals. Redis is never the source of truth. API restarts do not terminate active work; the worker reclaims expired leases.
+
+## Implemented surfaces
+
+- **Tasks** — repository selection, LLM-assisted or deterministic fallback planning, relevant role retrieval, editable team/steps/criteria/limits, mandatory approval.
+- **Runs** — live topology, agent instances, typed command/tool/file/check events, messages, artifacts, diffs, request-changes, approval, and guarded fast-forward merge.
+- **Workforce** — versioned role catalog imported from `agency-agents`, executable capability disclosure, provenance, and live per-run instances.
+- **Automations** — immutable versions, graph validation, typed nodes, test mode, approval pauses, manual runs, cron triggers, HMAC webhooks, and per-node history.
+- **Repositories** — ownership-scoped registration and preflight. Agent work occurs in NexusForge-managed clones; the registered checkout is touched only by explicit merge.
+- **Settings** — hot-swappable provider label, OpenAI-compatible or Anthropic protocol, endpoint, model, and encrypted API key.
+
+## Safety boundaries
+
+- Code-writing steps require a local or Docker tool-capable runner. HTTP-only LLM mode cannot report code work as complete.
+- Docker agents run non-root, resource-limited, capability-dropped, read-only except for one worktree, and never receive the Docker socket.
+- Successful code steps must produce repository changes; objective checks run before review.
+- Commands and deterministic loops are allowlisted and bounded. HTTP nodes require an explicit domain allowlist and reject private, loopback, link-local, reserved, and multicast targets.
+- Runner events are normalized, bounded, and secret-redacted before persistence.
+- Review and merge are separate commands. Merge revalidates the target branch, cleanliness, and expected base revision; it never forces conflicts.
+
+## Quick start
+
+Requirements: Docker with Compose and enough permission to use the Docker socket.
 
 ```bash
-# Backend
-cd packages/api
-pip install -e .
-uvicorn app.main:app --reload --port 8000
+cp .env.example .env
+docker build -t nexusforge-opencode-runner:latest -f docker/Dockerfile.runner .
+docker compose --env-file .env -f docker/docker-compose.dev.yml up --build -d
+```
+
+- Web: `http://localhost:3000`
+- API: `http://localhost:8000`
+- Development API docs: `http://localhost:8000/docs`
+
+The development stack includes `api`, `worker`, `webapp`, PostgreSQL with pgvector, and Redis. The API and worker mount `packages/` for development; the agent sandbox image is built from `docker/Dockerfile.runner`.
+
+Run migrations in non-disposable environments instead of relying on development schema creation:
+
+```bash
+docker compose -f docker/docker-compose.dev.yml exec api \
+  alembic -c packages/api/alembic.ini upgrade head
+```
+
+## Important configuration
+
+| Variable | Purpose |
+|---|---|
+| `DB_ASYNC_URL` | PostgreSQL async connection |
+| `REDIS_URL` | Optional delivery/wake-up channel |
+| `AUTH_SECRET_KEY` | JWT signing and local secret encryption |
+| `NEXUSFORGE_RUNNER_MODE` | `docker` for code; `local`/`http` are advisory-only |
+| `NEXUSFORGE_RUNNER_IMAGE` | Non-root coding sandbox image |
+| `NEXUSFORGE_HOST_PROJECTS_ROOT` | Host path mounted at the identical container path |
+| `NEXUSFORGE_HOST_RUNS_ROOT` | Managed clone/worktree root |
+| `NEXUSFORGE_AGENCY_AGENTS_PATH` | Versioned role profile source |
+| `NEXUSFORGE_WORKFLOW_COMMANDS` | Comma-separated executable allowlist for command nodes |
+
+Provider endpoint, model, protocol, and API key can be changed at runtime under Settings. New plans and subsequent worker steps read the saved tenant configuration without restarting containers.
+
+## API contracts
+
+Core endpoints are versioned below `/api/v1`:
+
+- `/chat/sessions`, `/plans`, `/repositories`
+- `/runs/{id}/detail`, `/events`, `/messages`, `/artifacts`, `/delegations`, `/review`, `/merge`
+- `/workforce/roles`, `/workforce/skills`, `/workforce/agents`
+- `/workflows/{id}/versions`, `/triggers`, `/runs`
+- `/workflows/hooks/{trigger_id}`
+- `/settings/llm`
+
+Every persisted run event carries a run/trace identity, sequence, actor, optional agent/task identity, visibility, timestamp, type, and typed payload. Compatibility task/run endpoints remain while the frontend migration finishes.
+
+## Verification
+
+```bash
+# Backend (inside the API image so PostgreSQL dependencies are identical)
+docker compose -f docker/docker-compose.dev.yml exec -T api pytest packages/api/tests -q
 
 # Frontend
 cd packages/web
-npm install --legacy-peer-deps
-npm run dev
+./node_modules/.bin/tsc --noEmit
+npm run build
 ```
 
-## Architecture
-
-```
-Frontend (Next.js 14+ / React 19 / React Flow)
-    |
-    | REST + SSE + WebSocket
-    v
-API Layer (FastAPI + 5-layer security middleware)
-    |
-    +---> Orchestration Engine (LangGraph StateGraph + 5 patterns)
-    +---> Agents (base, registry, sessions, factory, context)
-    +---> Middleware Pipeline (budget guard, PII, prompt guard, structured output, tool approval)
-    +---> Connectors (HubSpot, Salesforce, Jira, GitHub, Slack, ServiceNow, SAP, MS Graph)
-    +---> Knowledge (pgvector + GraphRAG + hybrid retrieval)
-    +---> Security (PII redactor, SSRF guard, prompt guard, tool quarantine, email allowlist)
-    +---> Memory (semantic store, session store, durable facts)
-    +---> Skills (progressive disclosure, sources, security)
-    +---> Handoff (Redis queues, dispatcher, cancellation)
-    +---> Observability (OpenTelemetry, Prometheus, cost tracking, evaluation, audit)
-    +---> Marketplace (template registry, installer, sandbox)
-    +---> CDC (poller, broadcaster)
-    +---> Browser (CDP, per-worker isolation)
-    |
-    v
-Data Layer: PostgreSQL 16+pgvector | Redis 7
-```
-
-## Project Structure
-
-```
-nexusforge/
-  pyproject.toml                      # Python workspace config (ruff, mypy)
-  README.md
-  .github/workflows/ci.yml           # CI/CD pipeline
-
-  packages/
-    api/                              # FastAPI application
-      pyproject.toml                  # Python deps (hatchling)
-      alembic.ini
-      app/
-        main.py                       # App factory + middleware stack
-        config.py                     # Pydantic Settings (env-based)
-        database.py                   # SQLAlchemy async engine + session
-        deps.py                       # Shared FastAPI dependency helpers
-        models.py                     # 12 ORM models
-        auth/                         # JWT, password hashing, dependencies
-        middleware/                    # 5 security middleware layers
-        routers/                      # 10 API routers
-      migrations/                     # Alembic migrations
-
-    orchestration/                    # LangGraph orchestration engine
-      state.py                        # WorkflowState TypedDict
-      graph/                          # StateGraph builder, edges, nodes
-      patterns/                       # Sequential, Concurrent, Handoff, Group, Magentic
-      supervisor/                     # Hub-and-spoke supervisor router
-      switching/                      # Agent Switching Saga
-      workflows/                      # Deterministic workflow nodes
-
-    agents/                           # Agent runtime
-      base.py                         # BaseAgent with circuit breaker
-      registry.py                     # Agent registry + capability discovery
-      session.py                      # Pluggable session persistence
-      context.py                      # AgentRunContext (AsyncLocal)
-      factory.py                      # YAML/JSON declarative agent factory
-      types/models.py                 # Agent type definitions
-
-    middleware/                        # Middleware pipeline
-      pipeline.py                     # beforeAgent -> afterAgent lifecycle
-      registry.py                     # Middleware name->class registry
-      builtins/                       # BudgetGuard, PromptGuard, PII, etc.
-
-    connectors/                       # 8 enterprise connectors
-      base.py                         # BaseConnector (retry, SSRF guard)
-      github/                         # GitHub REST API
-      hubspot/                        # HubSpot CRM
-      jira/                           # Jira Cloud
-      microsoft_graph/                # Teams / Outlook / Calendar
-      salesforce/                     # Salesforce CRM
-      sap/                            # SAP S/4HANA OData
-      servicenow/                     # ServiceNow Table API
-      slack/                          # Slack messaging
-
-    knowledge/                        # RAG system
-      vector_store.py                 # pgvector cosine similarity
-      graph_rag.py                    # Entity/community graph retrieval
-      hybrid.py                       # Vector + keyword + graph hybrid
-      file_understanding.py           # PDF extraction, chunking, citations
-
-    security/                         # Defense-in-depth security
-      pii_redactor.py                 # Regex PII scrubbing
-      prompt_guard.py                 # Heuristic injection detection
-      ssrf_guard.py                   # DNS pinning, private IP blocking
-      tool_quarantine.py              # Tool output envelope
-      email_allowlist.py              # Outbound email pinning
-
-    memory/                           # State and memory
-      store.py                        # pgvector semantic store
-      session_store.py                # Conversation persistence
-      durable_facts.py                # Durable facts + derived status
-
-    skills/                           # Progressive disclosure skills
-      registry.py                     # Skill discovery + registration
-      progressive.py                  # Advertise -> Load -> Execute
-      security.py                     # Symlink/path-traversal protection
-      sources/                        # File, inline, class, MCP-based
-
-    handoff/                          # Inter-agent communication
-      dispatcher.py                   # Message routing
-      queues.py                       # Queue management
-      cancellation.py                 # Cooperative AbortSignal propagation
-      types.py                        # Handoff message types
-
-    observability/                    # Observability stack
-      tracing.py                      # OpenTelemetry auto-instrumentation
-      metrics.py                      # Prometheus /metrics endpoint
-      cost_tracker.py                 # tiktoken token counting + cost table
-      evaluation.py                   # LLM-as-judge
-      audit.py                        # Immutable audit log
-
-    marketplace/                      # Template marketplace
-      registry.py                     # manifest.yaml schema + validation
-      installer.py                    # One-click install
-      sandbox.py                      # Secure reviewer gateway
-
-    cdc/                              # Change Data Capture
-      poller.py                       # DB trigger -> change_log -> poller
-      broadcaster.py                  # Fan-out to SSE, WebSocket, cache
-
-    browser/                          # Per-worker browser isolation
-      isolation.py                    # Isolated Chrome profiles per session
-      cdp.py                          # CDP automation bridge
-
-    web/                              # Next.js 14 frontend
-      package.json                    # React 19, React Flow, Zustand, Tailwind
-      tsconfig.json
-      tailwind.config.js
-      postcss.config.js
-      next.config.js
-      Dockerfile
-      src/
-        app/                          # App Router pages
-          layout.tsx                  # AppShell (sidebar + topbar)
-          globals.css                 # OKLCH design token system
-          page.tsx                    # Dashboard / Overview
-          agents/page.tsx             # Agent cards with filter
-          workflows/page.tsx          # React Flow visual graph editor
-          runs/page.tsx               # Live runs table + KPIs
-          knowledge/page.tsx          # Knowledge base management
-          marketplace/page.tsx        # Template marketplace
-          chat/page.tsx               # Chat interface
-          settings/page.tsx           # Platform settings
-        components/
-          ui/                         # Design system atoms (Badge, Button, Panel, Kpi)
-          graph-editor/               # NodePalette + ConfigPanel
-          dashboard/                  # RunsTable
-          chatkit/                    # ChatPanel
-          marketplace/                # MarketplaceGrid
-        hooks/                        # Custom React hooks
-        stores/app.ts                 # Zustand global state
-        lib/api.ts                    # openapi-fetch client
-
-  docker/
-    docker-compose.yml                # Production stack (api, webapp, postgres, redis)
-    docker-compose.dev.yml            # Dev overrides (volume mounts, hot reload)
-    Dockerfile.api                    # Multi-stage API build
-
-  k8s/
-    base/                             # K8s manifests (namespace, api, postgres, redis, ingress)
-    overlays/                         # Environment overlays
-```
-
-## Features
-
-- **5 Orchestration Patterns**: Sequential, Concurrent, Handoff, Group Chat, Magentic
-- **Agent Workflows**: Hybrid LangGraph + deterministic workflow nodes
-- **Visual Graph Editor**: React Flow drag-and-drop with 13 custom node types (Supervisor, Agent, Tool, Knowledge, If/Else, Loop, HTTP, Code, Start, End, Approval)
-- **8 Enterprise Connectors**: HubSpot, Salesforce, Jira, GitHub, Slack, ServiceNow, SAP, Microsoft Graph
-- **5-Layer Security**: SecurityHeaders -> RBAC -> RateLimit -> Security (PII + prompt guard) -> Audit
-- **Knowledge & RAG**: pgvector vector store + GraphRAG + hybrid retrieval
-- **Agent Switching**: Mid-session LLM/agent replacement with durable saga
-- **Marketplace**: Template registry with sandboxed validation
-- **Observability**: OpenTelemetry, Prometheus, cost tracking, LLM evaluation
-- **Durable Facts**: Status derived at read time, never stored (eliminates staleness)
-
-## API
-
-Interactive API docs at `/docs` (Swagger UI) or `/redoc` (ReDoc).
-
-### Key Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | /api/v1/auth/register | Register user |
-| POST | /api/v1/auth/login | Login |
-| GET | /api/v1/auth/me | Current user |
-| POST | /api/v1/workflows | Create workflow |
-| GET | /api/v1/workflows | List workflows |
-| PUT | /api/v1/workflows/{id} | Update workflow |
-| DELETE | /api/v1/workflows/{id} | Delete workflow |
-| POST | /api/v1/workflows/{id}/runs | Start workflow run |
-| POST | /api/v1/agents | Create agent |
-| GET | /api/v1/agents | List agents |
-| POST | /api/v1/knowledge/{id}/query | Query knowledge base |
-| GET | /api/v1/metrics/prometheus | Prometheus metrics |
-| GET | /health | Health check |
-
-## Configuration
-
-Key environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DB_ASYNC_URL` | Async PostgreSQL URL | postgresql+asyncpg://nexusforge:nexusforge@localhost:5432/nexusforge |
-| `DB_SYNC_URL` | Sync PostgreSQL URL | postgresql://nexusforge:nexusforge@localhost:5432/nexusforge |
-| `REDIS_URL` | Redis URL | redis://localhost:6379/0 |
-| `AUTH_SECRET_KEY` | JWT signing key | (generated) |
-| `NEXUSFORGE_ENVIRONMENT` | Environment | development |
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Backend | Python 3.12+, LangGraph, FastAPI, SQLAlchemy, Alembic |
-| Frontend | Next.js 14+, React 19, TypeScript, React Flow, Tailwind CSS v3, Zustand |
-| Database | PostgreSQL 16 + pgvector |
-| Cache/Queues | Redis 7 (Streams, Pub/Sub) |
-| Deployment | Docker Compose + Kubernetes |
-
-## License
-
-MIT
+The focused test suite covers planner JSON recovery, audit/security middleware, message transport, role import, workflow validation/cron behavior, and review semantics. Full Docker runner, restart recovery, browser, and merge-drift scenarios should remain required CI gates as the project moves beyond hackathon deployment.

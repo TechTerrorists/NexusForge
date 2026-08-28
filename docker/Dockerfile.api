@@ -22,6 +22,7 @@ COPY packages/observability /app/packages/observability
 COPY packages/marketplace /app/packages/marketplace
 COPY packages/cdc /app/packages/cdc
 COPY packages/browser /app/packages/browser
+COPY packages/task_runtime /app/packages/task_runtime
 ENV PYTHONPATH=/app:/app/packages/api
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

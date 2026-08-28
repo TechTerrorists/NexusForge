@@ -28,15 +28,22 @@ from app.database import Base
 
 
 class ExecutionStatus(str, enum.Enum):
+    PLANNING = "planning"
     PENDING = "pending"
+    QUEUED = "queued"
     RUNNING = "running"
+    BLOCKED = "blocked"
+    AWAITING_INPUT = "awaiting_input"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMEOUT = "timeout"
     RETRYING = "retrying"
     AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_REVIEW = "awaiting_review"
     NEEDS_REVIEW = "needs_review"
+    CHANGES_REQUESTED = "changes_requested"
+    MERGING = "merging"
 
 
 class AgentType(str, enum.Enum):
@@ -203,7 +210,7 @@ class Skill(Base):
     __tablename__ = "skills"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     skill_type: Mapped[str] = mapped_column(String(50), default="general")
     config: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
@@ -261,6 +268,12 @@ class WorkflowRun(Base):
     workflow_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
     )
+    workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    trace_id: Mapped[str] = mapped_column(String(64), default=lambda: uuid.uuid4().hex)
+    run_kind: Mapped[str] = mapped_column(String(32), default="agentic_task")
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[ExecutionStatus] = mapped_column(
         Enum(ExecutionStatus, values_callable=lambda e: [m.value for m in e]), default=ExecutionStatus.PENDING
     )
@@ -354,12 +367,16 @@ class ToolDefinition(Base):
     __tablename__ = "tool_definitions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tool_type: Mapped[str] = mapped_column(String(50), default="function")
     schema_: Mapped[Optional[dict]] = mapped_column("schema", JSONB, default=dict)
     endpoint_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     auth_config: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
+    permission_policy: Mapped[Optional[dict]] = mapped_column(JSONB, default=dict)
     rate_limit: Mapped[int] = mapped_column(Integer, default=100)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -368,6 +385,7 @@ class ToolDefinition(Base):
     )
 
     __table_args__ = (
+        Index("ix_tool_definitions_tenant_name", "tenant_id", "name", unique=True),
         Index("ix_tool_definitions_tool_type", "tool_type"),
     )
 
@@ -441,6 +459,7 @@ class Repository(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     local_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    managed_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     default_branch: Mapped[str] = mapped_column(String(255), default="main")
     allowed_commands: Mapped[dict] = mapped_column(JSONB, default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -508,6 +527,62 @@ class SkillVersion(Base):
     )
 
 
+class RoleTemplateVersion(Base):
+    """Versioned role profile. A role is staffed into an AgentInstance per run."""
+
+    __tablename__ = "role_template_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True
+    )
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    division: Mapped[str] = mapped_column(String(255), default="general")
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    capabilities: Mapped[dict] = mapped_column(JSONB, default=list)
+    compatible_tools: Mapped[dict] = mapped_column(JSONB, default=list)
+    source_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_executable: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    embedding = mapped_column(Vector(1536), nullable=True) if Vector is not None else mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_role_templates_slug_version", "tenant_id", "slug", "version", unique=True),
+        Index("ix_role_templates_active_division", "is_active", "division"),
+    )
+
+
+class SkillDefinitionVersion(Base):
+    """A reusable, versioned procedure independent from an agent persona."""
+
+    __tablename__ = "skill_definition_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True
+    )
+    slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    procedure: Mapped[str] = mapped_column(Text, nullable=False)
+    required_capabilities: Mapped[dict] = mapped_column(JSONB, default=list)
+    source_path: Mapped[str] = mapped_column(String(1024), default="")
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_skill_definitions_slug_version", "tenant_id", "slug", "version", unique=True),
+        Index("ix_skill_definitions_active", "slug", "is_active"),
+    )
+
+
 class TaskPlan(Base):
     __tablename__ = "task_plans"
 
@@ -524,6 +599,8 @@ class TaskPlan(Base):
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[TaskPlanStatus] = mapped_column(Enum(TaskPlanStatus, values_callable=lambda e: [m.value for m in e]), default=TaskPlanStatus.AWAITING_APPROVAL)
     plan_data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    constraints: Mapped[dict] = mapped_column(JSONB, default=dict)
+    limits: Mapped[dict] = mapped_column(JSONB, default=dict)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
@@ -548,6 +625,9 @@ class TaskStep(Base):
     skill_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("skill_versions.id", ondelete="SET NULL"), nullable=True
     )
+    role_template_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("role_template_versions.id", ondelete="SET NULL"), nullable=True
+    )
     depends_on: Mapped[dict] = mapped_column(JSONB, default=list)
     writes_code: Mapped[bool] = mapped_column(Boolean, default=False)
     nexus_phase: Mapped[str] = mapped_column(String(50), default="build")
@@ -555,6 +635,10 @@ class TaskStep(Base):
     parallel_group: Mapped[str | None] = mapped_column(String(255), nullable=True)
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
     acceptance_criteria: Mapped[str] = mapped_column(Text, default="")
+    expected_artifacts: Mapped[dict] = mapped_column(JSONB, default=list)
+    tool_grants: Mapped[dict] = mapped_column(JSONB, default=list)
+    side_effect_class: Mapped[str] = mapped_column(String(50), default="workspace")
+    delegation_depth: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[ExecutionStatus] = mapped_column(Enum(ExecutionStatus, values_callable=lambda e: [m.value for m in e]), default=ExecutionStatus.PENDING)
     output: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -576,6 +660,14 @@ class RunEvent(Base):
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     actor: Mapped[str] = mapped_column(String(255), default="system")
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    trace_id: Mapped[str] = mapped_column(String(64), default="")
+    agent_instance_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agent_instances.id", ondelete="SET NULL"), nullable=True
+    )
+    task_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_steps.id", ondelete="SET NULL"), nullable=True
+    )
+    visibility: Mapped[str] = mapped_column(String(32), default="user")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_run_events_run_sequence", "run_id", "sequence", unique=True),)
@@ -595,3 +687,166 @@ class RunArtifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (Index("ix_run_artifacts_run_kind", "run_id", "kind"),)
+
+
+class AgentInstance(Base):
+    __tablename__ = "agent_instances"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    task_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_steps.id", ondelete="SET NULL"), nullable=True
+    )
+    role_template_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("role_template_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    role_slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    role_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    model_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    tool_grants: Mapped[dict] = mapped_column(JSONB, default=list)
+    budget_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[ExecutionStatus] = mapped_column(
+        Enum(ExecutionStatus, values_callable=lambda e: [m.value for m in e]),
+        default=ExecutionStatus.QUEUED,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_agent_instances_run_status", "run_id", "status"),
+        Index("ix_agent_instances_step", "task_step_id"),
+    )
+
+
+class AgentMessageRecord(Base):
+    __tablename__ = "agent_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    sender: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipient: Mapped[str] = mapped_column(String(255), default="orchestrator")
+    message_type: Mapped[str] = mapped_column(String(64), default="status")
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    artifact_refs: Mapped[dict] = mapped_column(JSONB, default=list)
+    reply_to: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_agent_messages_run_created", "run_id", "created_at"),)
+
+
+class DelegationRequest(Base):
+    __tablename__ = "delegation_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    requester_step_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_steps.id", ondelete="CASCADE"), nullable=False
+    )
+    requested_role_slug: Mapped[str] = mapped_column(String(255), nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    acceptance_criteria: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="requested")
+    decision_reason: Mapped[str] = mapped_column(Text, default="")
+    child_step_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_steps.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_delegations_run_status", "run_id", "status"),)
+
+
+class ExecutionJob(Base):
+    __tablename__ = "execution_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("task_plans.id", ondelete="CASCADE"), nullable=True
+    )
+    job_type: Mapped[str] = mapped_column(String(50), default="agentic_task")
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    leased_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    leased_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (Index("ix_execution_jobs_claim", "status", "available_at"),)
+
+
+class WorkflowVersion(Base):
+    __tablename__ = "workflow_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="draft")
+    graph_config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    input_schema: Mapped[dict] = mapped_column(JSONB, default=dict)
+    compiled_plan: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_workflow_versions_unique", "workflow_id", "version", unique=True),)
+
+
+class WorkflowTrigger(Base):
+    __tablename__ = "workflow_triggers"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    workflow_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    trigger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    secret_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    next_fire_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_workflow_triggers_due", "is_active", "next_fire_at"),)
+
+
+class WorkflowNodeRun(Base):
+    __tablename__ = "workflow_node_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    node_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[ExecutionStatus] = mapped_column(
+        Enum(ExecutionStatus, values_callable=lambda e: [m.value for m in e]),
+        default=ExecutionStatus.QUEUED,
+    )
+    input_data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    output_data: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (Index("ix_workflow_node_runs_unique", "run_id", "node_key", unique=True),)

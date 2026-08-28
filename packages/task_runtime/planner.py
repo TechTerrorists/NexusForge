@@ -26,6 +26,9 @@ class PlannedStep:
     parallel_group: str | None = None
     max_retries: int = 3
     acceptance_criteria: str = ""
+    expected_artifacts: tuple[str, ...] = ()
+    tool_grants: tuple[str, ...] = ()
+    side_effect_class: str = "workspace"
 
 
 def _build_skills_context(skills: list[Any]) -> str:
@@ -216,6 +219,9 @@ async def llm_create_plan(
                 parallel_group=s.parallel_group,
                 max_retries=s.max_retries,
                 acceptance_criteria=s.acceptance_criteria,
+                expected_artifacts=tuple(s.expected_artifacts),
+                tool_grants=tuple(s.tool_grants),
+                side_effect_class=s.side_effect_class if s.side_effect_class in {"read_only", "workspace", "external", "privileged"} else "workspace",
             ))
 
         if not steps:
@@ -298,6 +304,9 @@ def _deterministic_plan(goal: str, skills: list[Any]) -> list[PlannedStep]:
             nexus_phase="discover",
             role="researcher",
             acceptance_criteria="Written analysis of codebase and task requirements",
+            expected_artifacts=("repository assessment",),
+            tool_grants=("repository_read",),
+            side_effect_class="read_only",
         ),
         PlannedStep(
             key="implement",
@@ -312,6 +321,8 @@ def _deterministic_plan(goal: str, skills: list[Any]) -> list[PlannedStep]:
             nexus_phase="build",
             role="engineer",
             acceptance_criteria="Code implemented, tests passing locally",
+            expected_artifacts=("source changes", "tests"),
+            tool_grants=("repository_read", "repository_write", "command_execute"),
         ),
         PlannedStep(
             key="review",
@@ -326,6 +337,9 @@ def _deterministic_plan(goal: str, skills: list[Any]) -> list[PlannedStep]:
             nexus_phase="harden",
             role="reviewer",
             acceptance_criteria="Code review complete, no blocking issues found",
+            expected_artifacts=("review findings", "check results"),
+            tool_grants=("repository_read", "command_execute"),
+            side_effect_class="read_only",
         ),
     ]
 

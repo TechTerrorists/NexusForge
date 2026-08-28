@@ -5,9 +5,6 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
-from datetime import datetime
-
-
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -53,47 +50,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.task_scheduler = TaskScheduler(async_session_factory, message_bus=message_bus)
 
+    # The dedicated worker owns run recovery. API restarts must never convert
+    # otherwise resumable work into a terminal failure.
     try:
-        from sqlalchemy import select as sa_select
-        from app.models import ExecutionStatus, WorkflowRun
-        async with async_session_factory() as db:
-            orphaned = (await db.scalars(
-                sa_select(WorkflowRun).where(WorkflowRun.status == ExecutionStatus.RUNNING)
-            )).all()
-            for run in orphaned:
-                run.status = ExecutionStatus.FAILED
-                run.error = "Run interrupted: server restarted while execution was in progress."
-                run.completed_at = datetime.utcnow()
-            if orphaned:
-                await db.commit()
-                logger.warning("Recovered %d orphaned RUNNING runs (marked as FAILED)", len(orphaned))
+        from pathlib import Path
+        from packages.task_runtime.skill_importer import import_skills
+
+        agency_path = os.getenv("NEXUSFORGE_AGENCY_AGENTS_PATH", "/opt/agency-agents")
+        source = Path(agency_path)
+        if source.is_dir():
+            # Import is hash-idempotent and creates a new immutable version when
+            # a source profile changes, so startup also refreshes an existing catalog.
+            result = await import_skills(async_session_factory, source)
+            logger.info("Synchronized workforce catalog: %s", result)
     except Exception:
-        logger.exception("Failed to recover orphaned runs")
-
-    api_key = settings.opencode_llm.api_key.get_secret_value()
-    if api_key:
-        try:
-            from pathlib import Path
-            from sqlalchemy import select
-            from app.models import SkillVersion
-            from packages.task_runtime.skill_importer import import_skills
-
-            async with async_session_factory() as db:
-                count = (await db.scalar(select(SkillVersion.id))) if False else len(
-                    (await db.scalars(select(SkillVersion))).all()
-                )
-            if count == 0:
-                agency_path = os.getenv("NEXUSFORGE_AGENCY_AGENTS_PATH", "/opt/agency-agents")
-                source = Path(agency_path)
-                if source.is_dir():
-                    result = await import_skills(
-                        async_session_factory, source,
-                        api_key=api_key,
-                        base_url=settings.opencode_llm.base_url or None,
-                    )
-                    logger.info("Auto-imported skills: %s", result)
-        except Exception:
-            logger.exception("Skill auto-import failed")
+        logger.exception("Workforce role import failed")
 
     logger.info(
         "NexusForge API started | env=%s | version=%s",

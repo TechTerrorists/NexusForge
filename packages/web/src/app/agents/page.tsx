@@ -1,211 +1,124 @@
 "use client";
 
-import { useState } from "react";
-import {
-  Plus,
-  Bot,
-  Play,
-  Square,
-  Wrench,
-  MoreVertical,
-  Cpu,
-  Activity,
-} from "lucide-react";
-import { Badge } from "@/components/ui";
+import { useEffect, useMemo, useState } from "react";
+import { Activity, Bot, CheckCircle2, Clock3, Search, ShieldCheck, Wrench } from "lucide-react";
+import { api } from "@/lib/nexus";
 
-interface Agent {
+type Role = {
   id: string;
+  slug: string;
   name: string;
-  model: string;
-  status: "running" | "idle";
-  tools: string[];
-  runCount: number;
   description: string;
-  color: "blue" | "purple" | "emerald" | "amber" | "red";
-}
-
-const DEMO_AGENTS: Agent[] = [
-  {
-    id: "a1", name: "Research Agent", model: "gpt-4o", status: "running",
-    tools: ["web_search", "arxiv", "summarize"], runCount: 142,
-    description: "Searches and summarizes academic papers and web sources.", color: "blue",
-  },
-  {
-    id: "a2", name: "Code Review Agent", model: "claude-sonnet-4-20250514", status: "idle",
-    tools: ["github", "code_analysis", "lint"], runCount: 87,
-    description: "Reviews pull requests and suggests improvements.", color: "emerald",
-  },
-  {
-    id: "a3", name: "Data Analyzer", model: "gpt-4o-mini", status: "running",
-    tools: ["sql_query", "chart_gen", "pandas"], runCount: 231,
-    description: "Analyzes datasets and generates visualizations.", color: "purple",
-  },
-  {
-    id: "a4", name: "Support Triage", model: "claude-sonnet-4-20250514", status: "idle",
-    tools: ["zendesk", "knowledge_base", "email"], runCount: 56,
-    description: "Classifies and routes incoming support tickets.", color: "amber",
-  },
-  {
-    id: "a5", name: "Outreach Writer", model: "gpt-4o", status: "idle",
-    tools: ["crm", "email_send", "template"], runCount: 34,
-    description: "Drafts personalized outreach emails from CRM data.", color: "red",
-  },
-  {
-    id: "a6", name: "Security Scanner", model: "gpt-4o-mini", status: "running",
-    tools: ["sast", "dependency_check", "secret_scan"], runCount: 19,
-    description: "Scans codebases for vulnerabilities and secrets.", color: "blue",
-  },
-];
-
-const COLOR_MAP = {
-  blue:    { bg: "var(--blue-1)",    fg: "var(--blue-4)",    border: "var(--blue-2)" },
-  purple:  { bg: "var(--purple-1)",  fg: "var(--purple-4)",  border: "var(--purple-2)" },
-  emerald: { bg: "var(--emerald-1)", fg: "var(--emerald-4)", border: "var(--emerald-2)" },
-  amber:   { bg: "var(--amber-1)",   fg: "var(--amber-4)",   border: "var(--amber-2)" },
-  red:     { bg: "var(--red-1)",     fg: "var(--red-4)",     border: "var(--red-2)" },
+  division: string;
+  version: number;
+  capabilities: string[];
+  compatible_tools: string[];
+  source_path: string;
+  is_executable: boolean;
 };
 
-export default function AgentsPage() {
-  const [filter, setFilter] = useState<"all" | "running" | "idle">("all");
+type AgentInstance = {
+  id: string;
+  run_id: string;
+  name: string;
+  role_slug: string;
+  status: string;
+  model: Record<string, string>;
+  tool_grants: string[];
+  started_at: string | null;
+};
 
-  const filtered = DEMO_AGENTS.filter(
-    (a) => filter === "all" || a.status === filter
-  );
+export default function WorkforcePage() {
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [agents, setAgents] = useState<AgentInstance[]>([]);
+  const [search, setSearch] = useState("");
+  const [division, setDivision] = useState("all");
+  const [selected, setSelected] = useState<Role | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
-  return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">Agents</h1>
-          <p className="text-[13px] mt-0.5" style={{ color: "var(--fg-muted)" }}>
-            {DEMO_AGENTS.filter((a) => a.status === "running").length} running ·{" "}
-            {DEMO_AGENTS.length} total
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <div
-            className="flex rounded-lg overflow-hidden text-[13px]"
-            style={{ border: "1px solid var(--border-default)" }}
-          >
-            {(["all", "running", "idle"] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className="px-3 py-1.5 capitalize transition-colors"
-                style={{
-                  background: filter === f ? "var(--blue-3)" : "var(--bg-elevated)",
-                  color: filter === f ? "#0a0a0f" : "var(--fg-secondary)",
-                }}
-              >
-                {f}
-              </button>
-            ))}
+  useEffect(() => {
+    Promise.all([
+      api<{ items: Role[] }>("/api/v1/workforce/roles?limit=300"),
+      api<AgentInstance[]>("/api/v1/workforce/agents?limit=50"),
+    ]).then(([catalog, instances]) => {
+      setRoles(catalog.items);
+      setAgents(instances);
+      setLoading(false);
+    }).catch((reason) => {
+      setError(reason instanceof Error ? reason.message : "Unable to load the workforce");
+      setLoading(false);
+    });
+  }, []);
+
+  const divisions = useMemo(() => ["all", ...Array.from(new Set(roles.map((role) => role.division))).sort()], [roles]);
+  const filtered = useMemo(() => roles.filter((role) => {
+    const matchDivision = division === "all" || role.division === division;
+    const haystack = `${role.name} ${role.slug} ${role.description} ${role.capabilities.join(" ")}`.toLowerCase();
+    return matchDivision && haystack.includes(search.toLowerCase());
+  }), [roles, division, search]);
+  const running = agents.filter((agent) => agent.status === "running");
+
+  return <div className="mission-page">
+    <header className="mission-heading">
+      <div>
+        <p className="eyebrow">Versioned talent registry</p>
+        <h1>Workforce</h1>
+        <p>Role templates become immutable, temporary agent instances only when a plan is approved.</p>
+      </div>
+      <div className="flex gap-2">
+        <span className="signal-chip"><Activity size={13} /> {running.length} active</span>
+        <span className="signal-chip"><ShieldCheck size={13} /> {roles.filter((role) => role.is_executable).length} executable</span>
+      </div>
+    </header>
+
+    {error && <div className="error-state">{error}</div>}
+
+    <section className="panel mb-5">
+      <div className="panel-head"><span className="title">Active agent instances</span><span className="text-xs" style={{ color: "var(--fg-muted)" }}>Ephemeral · run scoped</span></div>
+      <div className="grid gap-px sm:grid-cols-2 xl:grid-cols-4" style={{ background: "var(--border-subtle)" }}>
+        {agents.slice(0, 8).map((agent) => <a href={`/runs?run=${agent.run_id}`} key={agent.id} className="p-4 block" style={{ background: "var(--bg-canvas)" }}>
+          <div className="flex items-start justify-between gap-2"><Bot size={17} style={{ color: "var(--blue-4)" }} /><span className={`badge ${agent.status === "running" ? "blue" : agent.status === "completed" ? "emerald" : ""}`}>{agent.status}</span></div>
+          <p className="mt-3 text-sm font-medium line-clamp-1">{agent.name}</p>
+          <p className="mt-1 text-[11px] font-mono" style={{ color: "var(--fg-muted)" }}>{agent.model.model || "configured model"}</p>
+        </a>)}
+        {!agents.length && !loading && <div className="empty-state sm:col-span-2 xl:col-span-4"><Clock3 size={18} /><span>No agents are staffed right now. Approve a task plan to create a team.</span></div>}
+      </div>
+    </section>
+
+    <div className="grid gap-5 xl:grid-cols-[1fr_340px]">
+      <section className="panel">
+        <div className="panel-head gap-3">
+          <span className="title">Role catalog <span className="badge">{filtered.length}</span></span>
+          <div className="flex min-w-0 gap-2">
+            <label className="search-field"><Search size={13} /><input aria-label="Search roles" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search roles or skills" /></label>
+            <select aria-label="Division" value={division} onChange={(event) => setDivision(event.target.value)} className="field compact"><option value="all">All divisions</option>{divisions.slice(1).map((item) => <option key={item} value={item}>{item}</option>)}</select>
           </div>
-          <button className="btn primary">
-            <Plus size={14} />
-            New Agent
-          </button>
         </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {filtered.map((agent) => {
-          const c = COLOR_MAP[agent.color];
-          return (
-            <div
-              key={agent.id}
-              className="rounded-lg transition-shadow hover:shadow-md"
-              style={{
-                background: "var(--bg-canvas)",
-                border: "1px solid var(--border-subtle)",
-              }}
-            >
-              <div className="p-4">
-                <div className="flex items-start justify-between mb-3">
-                  <div className="flex items-center gap-2.5">
-                    <div
-                      className="w-8 h-8 rounded-lg flex items-center justify-center text-[11px] font-bold"
-                      style={{
-                        background: c.bg,
-                        color: c.fg,
-                        border: `1px solid ${c.border}`,
-                      }}
-                    >
-                      {agent.name.split(" ").map(w => w[0]).join("").slice(0, 2)}
-                    </div>
-                    <div>
-                      <h3 className="text-[13px] font-semibold" style={{ color: "var(--fg-primary)" }}>
-                        {agent.name}
-                      </h3>
-                      <p className="text-[11px]" style={{ color: "var(--fg-muted)" }}>
-                        {agent.model}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={agent.status === "running" ? "emerald" : "default"}>
-                      {agent.status === "running" && (
-                        <Activity size={10} className="animate-pulse" />
-                      )}
-                      {agent.status}
-                    </Badge>
-                  </div>
-                </div>
-
-                <p className="text-[13px] mb-3" style={{ color: "var(--fg-muted)" }}>
-                  {agent.description}
-                </p>
-
-                <div className="flex flex-wrap gap-1 mb-3">
-                  {agent.tools.map((tool) => (
-                    <span
-                      key={tool}
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]"
-                      style={{
-                        background: "var(--bg-elevated)",
-                        color: "var(--fg-muted)",
-                        border: "1px solid var(--border-subtle)",
-                      }}
-                    >
-                      <Wrench size={9} />
-                      {tool}
-                    </span>
-                  ))}
-                </div>
-
-                <div
-                  className="flex items-center justify-between pt-3"
-                  style={{ borderTop: "1px solid var(--border-subtle)" }}
-                >
-                  <div className="flex items-center gap-1 text-[11px]" style={{ color: "var(--fg-muted)" }}>
-                    <Cpu size={12} />
-                    {agent.runCount} runs
-                  </div>
-                  <div className="flex gap-1">
-                    {agent.status === "running" ? (
-                      <button
-                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium"
-                        style={{ background: "var(--red-1)", color: "var(--red-4)" }}
-                      >
-                        <Square size={10} />
-                        Stop
-                      </button>
-                    ) : (
-                      <button
-                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium"
-                        style={{ background: "var(--emerald-1)", color: "var(--emerald-4)" }}
-                      >
-                        <Play size={10} />
-                        Run
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
+        <div className="grid gap-px md:grid-cols-2" style={{ background: "var(--border-subtle)" }}>
+          {filtered.map((role) => <button key={role.id} onClick={() => setSelected(role)} className="role-card text-left">
+            <div className="flex items-start justify-between gap-3">
+              <div className="role-mark">{role.name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2)}</div>
+              <span className={`badge ${role.is_executable ? "emerald" : "amber"}`}>{role.is_executable ? "v1 ready" : "catalog only"}</span>
             </div>
-          );
-        })}
-      </div>
+            <h2>{role.name}</h2>
+            <p>{role.description || "Imported role profile"}</p>
+            <div className="flex flex-wrap gap-1.5 mt-3">{role.capabilities.slice(0, 3).map((item) => <span className="capability" key={item}>{item}</span>)}</div>
+            <div className="role-meta"><span>{role.division}</span><span>v{role.version}</span></div>
+          </button>)}
+          {!filtered.length && !loading && <div className="empty-state md:col-span-2">No role templates match this filter.</div>}
+        </div>
+      </section>
+
+      <aside className="panel h-fit xl:sticky xl:top-5">
+        <div className="panel-head"><span className="title">Role detail</span></div>
+        {selected ? <div className="panel-body space-y-5">
+          <div><p className="eyebrow">{selected.division} · version {selected.version}</p><h2 className="text-lg font-semibold mt-1">{selected.name}</h2><p className="text-sm mt-2" style={{ color: "var(--fg-secondary)" }}>{selected.description}</p></div>
+          <div><p className="detail-label">Capabilities</p><div className="flex flex-wrap gap-2">{selected.capabilities.map((item) => <span className="capability" key={item}><CheckCircle2 size={10} /> {item}</span>)}</div></div>
+          <div><p className="detail-label">Compatible tools</p>{selected.compatible_tools.length ? selected.compatible_tools.map((item) => <div className="detail-row" key={item}><Wrench size={12} /> {item}</div>) : <p className="text-xs" style={{ color: "var(--fg-muted)" }}>No executable tools are declared yet.</p>}</div>
+          <div><p className="detail-label">Provenance</p><p className="break-all text-[11px] font-mono" style={{ color: "var(--fg-muted)" }}>{selected.source_path}</p></div>
+        </div> : <div className="empty-state min-h-64">Select a role to inspect its version, tools, and provenance.</div>}
+      </aside>
     </div>
-  );
+  </div>;
 }

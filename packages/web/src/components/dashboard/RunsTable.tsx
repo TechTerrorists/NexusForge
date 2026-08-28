@@ -28,7 +28,11 @@ const STATUS_BADGE: Record<string, string> = {
   cancelled: "badge",
   pending: "badge amber",
   awaiting_approval: "badge amber",
+  awaiting_review: "badge purple",
   needs_review: "badge purple",
+  changes_requested: "badge amber",
+  blocked: "badge red",
+  merging: "badge blue",
 };
 
 function parseDuration(s: string): number {

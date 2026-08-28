@@ -78,6 +78,10 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
+    settings = get_settings()
+    if settings.environment not in {"development", "test"}:
+        logger.info("Schema auto-create disabled outside disposable environments")
+        return
     if engine is None:
         init_engine()
     try:
