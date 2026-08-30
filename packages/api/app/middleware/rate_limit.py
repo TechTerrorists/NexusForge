@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -48,16 +47,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         anon_limit: int = 30,
         mutating_limit: int = 60,
         read_limit: int = 600,
+        stream_limit: int = 120,
         window_seconds: float = 60.0,
     ) -> None:
         super().__init__(app)  # type: ignore[arg-type]
         self.anon_limit = anon_limit
         self.mutating_limit = mutating_limit
         self.read_limit = read_limit
+        self.stream_limit = stream_limit
         self.window_seconds = window_seconds
-        self._buckets: dict[str, TokenBucket] = defaultdict(
-            lambda: TokenBucket(capacity=read_limit, refill_rate=read_limit / window_seconds)
-        )
+        self._buckets: dict[str, TokenBucket] = {}
         self._last_cleanup = time.monotonic()
         self._cleanup_interval = 300.0
 
@@ -69,13 +68,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             ip = request.client.host if request.client else "unknown"
         return ip
 
-    def _get_or_create_bucket(self, key: str, is_anonymous: bool) -> TokenBucket:
+    def _get_or_create_bucket(self, key: str, limit: int) -> TokenBucket:
         if key not in self._buckets:
-            limit = self.anon_limit if is_anonymous else self.read_limit
             self._buckets[key] = TokenBucket(
                 capacity=limit, refill_rate=limit / self.window_seconds
             )
         return self._buckets[key]
+
+    def _policy(self, request: Request, is_anonymous: bool) -> tuple[str, int]:
+        if request.method in self.MUTATING_METHODS:
+            return "mutation", self.anon_limit if is_anonymous else self.mutating_limit
+        if request.url.path.endswith("/events"):
+            return "stream", self.stream_limit
+        return "read", self.read_limit
 
     def _cleanup_expired(self) -> None:
         now = time.monotonic()
@@ -101,13 +106,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         client_key = self._get_client_key(request)
         is_anonymous = not getattr(request.state, "user_id", None)
-
-        bucket = self._get_or_create_bucket(client_key, is_anonymous)
-
-        if request.method in self.MUTATING_METHODS:
-            allowed = bucket.consume(self.mutating_limit // self.anon_limit)
-        else:
-            allowed = bucket.consume(1)
+        identity = str(getattr(request.state, "user_id", "anonymous"))
+        lane, limit = self._policy(request, is_anonymous)
+        bucket = self._get_or_create_bucket(f"{client_key}:{identity}:{lane}", limit)
+        allowed = bucket.consume(1)
 
         if not allowed:
             retry_after = int(bucket.retry_after) + 1

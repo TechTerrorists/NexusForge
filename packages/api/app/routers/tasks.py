@@ -25,6 +25,7 @@ from app.models import (
     RunEvent, TaskPlan, TaskPlanStatus, TaskStep, User, UserRole, Workflow,
     WorkflowRun, WorkflowStatus,
 )
+from packages.task_runtime.git_process import git_capture
 from packages.task_runtime.planner import PlannedStep, llm_create_plan
 from packages.task_runtime.scheduler import TaskScheduler
 from packages.task_runtime.skill_retriever import retrieve_roles
@@ -142,15 +143,7 @@ def _validate_repository_root(path: Path) -> None:
 
 
 async def _git_capture(cwd: Path, *args: str) -> tuple[int, str]:
-    process = await asyncio.create_subprocess_exec(
-        "git",
-        *args,
-        cwd=cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    stdout, _ = await process.communicate()
-    return process.returncode or 0, stdout.decode("utf-8", "replace").strip()
+    return await git_capture(cwd, *args, stderr_to_stdout=True)
 
 
 async def _repository_preflight(repository: Repository, *, require_tool_runner: bool = True) -> dict:
@@ -557,6 +550,82 @@ async def cancel_run(run_id: uuid.UUID, request: Request, db: AsyncSession = Dep
         await db.commit()
         return {"status": "cancelled"}
     return {"status": run.status.value}
+
+
+@router.post("/runs/{run_id}/resume")
+async def resume_run(
+    run_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(
+        require_role(UserRole.EDITOR, UserRole.ADMIN, UserRole.OWNER)
+    ),
+):
+    """Resume a failed agentic run from its durable completed-step ledger."""
+
+    run = await _owned_run(db, user, run_id)
+    if run.run_kind != "agentic_task":
+        raise HTTPException(status_code=409, detail="Only agentic task runs can be resumed")
+    if run.status not in {ExecutionStatus.FAILED, ExecutionStatus.TIMEOUT}:
+        raise HTTPException(status_code=409, detail="Only failed or timed-out runs can be resumed")
+
+    plan_id = (run.input_data or {}).get("plan_id")
+    plan = await db.get(TaskPlan, uuid.UUID(plan_id)) if plan_id else None
+    if plan is None or plan.status != TaskPlanStatus.APPROVED:
+        raise HTTPException(status_code=409, detail="Run has no approved resumable plan")
+    jobs = list(
+        (await db.scalars(select(ExecutionJob).where(ExecutionJob.run_id == run.id))).all()
+    )
+    if any(job.status in {"queued", "leased", "running"} for job in jobs):
+        raise HTTPException(status_code=409, detail="Run already has active execution work")
+    resume_number = (
+        sum(job.idempotency_key.startswith(f"run:{run.id}:resume:") for job in jobs) + 1
+    )
+    max_resumes = max(1, min(int((plan.limits or {}).get("max_retries", 3)), 10))
+    if resume_number > max_resumes:
+        raise HTTPException(status_code=409, detail="The approved run-resume limit has been reached")
+
+    failed_steps = list(
+        (
+            await db.scalars(
+                select(TaskStep).where(
+                    TaskStep.plan_id == plan.id,
+                    TaskStep.status.in_([ExecutionStatus.FAILED, ExecutionStatus.RUNNING]),
+                )
+            )
+        ).all()
+    )
+    for step in failed_steps:
+        step.status = ExecutionStatus.PENDING
+        step.error = None
+        step.started_at = None
+        step.completed_at = None
+    run.status = ExecutionStatus.QUEUED
+    run.error = None
+    run.completed_at = None
+    db.add(
+        ExecutionJob(
+            run_id=run.id,
+            plan_id=plan.id,
+            job_type="agentic_task",
+            status="queued",
+            idempotency_key=f"run:{run.id}:resume:{resume_number}",
+        )
+    )
+    scheduler: TaskScheduler = request.app.state.task_scheduler
+    await scheduler.emit(
+        db,
+        run.id,
+        "run_resumed",
+        "user",
+        {
+            "resume": resume_number,
+            "completed_steps_reused": True,
+            "reset_steps": [step.key for step in failed_steps],
+        },
+    )
+    await db.commit()
+    return {"status": run.status.value, "resume": resume_number}
 
 
 @router.post("/runs/{run_id}/review")

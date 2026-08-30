@@ -30,10 +30,14 @@ from app.models import (
     WorkflowRun,
 )
 from packages.handoff.redis_streams import RedisMessageBus
+from packages.task_runtime.git_process import git_capture
 from packages.task_runtime.opencode import OpenCodeResult, OpenCodeRunner
 
 logger = logging.getLogger(__name__)
-_SECRET_KEYS = re.compile(r"(api[-_]?key|authorization|password|secret|token)", re.I)
+_SECRET_KEYS = re.compile(
+    r"(?:^|[_-])(?:api[-_]?key|authorization|password|secret|token)(?:$|[_-])",
+    re.I,
+)
 
 
 class TaskScheduler:
@@ -194,6 +198,9 @@ class TaskScheduler:
                     if code:
                         await self._git_capture(integration, "cherry-pick", "--abort")
                         raise RuntimeError(f"Could not recover integrated step '{step.key}': {merge_output[-1000:]}")
+            recovered_worktree = integration.parent / f"step-{str(step.id)[:8]}"
+            if recovered_worktree.exists():
+                await self._remove_worktree(integration, recovered_worktree)
             completed.add(step.key)
         while True:
             # Managed delegations append immutable child steps while a run is
@@ -265,6 +272,19 @@ class TaskScheduler:
         worktree = run_root / f"step-{str(step_id)[:8]}"
         branch = f"step-{str(step_id)[:8]}"
         integration = run_root / "integration"
+        # A worker can fail after registering a worktree but before completing
+        # the step. A resumed ledger reuses completed commits and recreates only
+        # failed/incomplete workspaces from the current integration revision.
+        if worktree.exists():
+            cleanup_code, cleanup_output = await self._git_capture(
+                integration, "worktree", "remove", "--force", str(worktree)
+            )
+            if cleanup_code:
+                raise RuntimeError(
+                    f"Could not clean the previous workspace for '{branch}': "
+                    f"{cleanup_output[-1000:]}"
+                )
+        await self._git_capture(integration, "branch", "-D", branch)
         await self._git(integration, "worktree", "add", "-b", branch, str(worktree), base_revision)
         if os.getenv("NEXUSFORGE_RUNNER_MODE", "http") == "docker":
             await asyncio.to_thread(_set_agent_ownership, worktree)
@@ -311,7 +331,9 @@ class TaskScheduler:
                 result = await self.runner.run(
                     prompt=prompt,
                     workdir=worktree,
-                    agent=actor,
+                    # NexusForge workforce roles are personas carried by the
+                    # prompt and ledger, not OpenCode-native agent IDs.
+                    agent=None,
                     provider=config_values[0],
                     adapter=config_values[1],
                     base_url=config_values[2],
@@ -450,10 +472,25 @@ class TaskScheduler:
                 commands.append(item)
         checks = []
         for command in commands:
-            process = await asyncio.create_subprocess_exec(*command, cwd=worktree, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await process.communicate()
-            output = (stdout + stderr).decode("utf-8", "replace")[-16_000:]
-            check = {"command": command, "exit_code": process.returncode, "status": "passed" if process.returncode == 0 else "failed", "output": output}
+            if command[0] == "git":
+                exit_code, output = await git_capture(worktree, *command[1:])
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=worktree,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+                exit_code = process.returncode or 0
+                output = (stdout + stderr).decode("utf-8", "replace")
+            output = output[-16_000:]
+            check = {
+                "command": command,
+                "exit_code": exit_code,
+                "status": "passed" if exit_code == 0 else "failed",
+                "output": output,
+            }
             checks.append(check)
         return checks
 
@@ -494,9 +531,7 @@ class TaskScheduler:
             raise RuntimeError(output[-4000:] or f"git {' '.join(args)} failed")
 
     async def _git_capture(self, cwd: Path, *args: str) -> tuple[int, str]:
-        process = await asyncio.create_subprocess_exec("git", *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await process.communicate()
-        return process.returncode or 0, (stdout + stderr).decode("utf-8", "replace").strip()
+        return await git_capture(cwd, *args)
 
     async def _git_output(self, cwd: Path, *args: str) -> str:
         code, output = await self._git_capture(cwd, *args)

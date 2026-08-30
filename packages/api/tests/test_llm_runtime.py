@@ -4,7 +4,7 @@ import json
 import uuid
 
 import pytest
-from packages.task_runtime.opencode import OpenCodeRunner
+from packages.task_runtime.opencode import OpenCodeRunner, _event_text_parts, _event_usage
 
 from app.llm_runtime import (
     decrypt_api_key,
@@ -146,3 +146,54 @@ def test_opencode_provider_config_uses_selected_adapter_and_model() -> None:
     assert config["options"]["baseURL"] == "https://api.anthropic.com"
     assert config["options"]["apiKey"] == "{env:NEXUSFORGE_OPENCODE_API_KEY}"
     assert "claude-sonnet-4-20250514" in config["models"]
+
+
+def test_opencode_openrouter_config_uses_builtin_provider() -> None:
+    runner = OpenCodeRunner()
+
+    assert runner._is_openrouter("OpenRouter", "https://openrouter.ai/api/v1")
+    config = json.loads(runner._openrouter_config("openrouter/nvidia/nemotron"))
+
+    assert "nvidia/nemotron" in config["provider"]["openrouter"]["models"]
+    assert "openrouter/nvidia/nemotron" not in config["provider"]["openrouter"]["models"]
+    assert "nexusforge" not in config["provider"]
+
+
+def test_opencode_failure_reports_structured_error_and_strips_ansi() -> None:
+    message = OpenCodeRunner._failure_message(
+        "OpenCode sandbox",
+        [
+            {
+                "type": "error",
+                "error": {
+                    "data": {"ref": "err_example", "message": "Provider rejected model"}
+                },
+            }
+        ],
+        '\x1b[93magent "missing" not found\x1b[0m',
+    )
+
+    assert message == (
+        'OpenCode sandbox failed: Provider rejected model; reference err_example; '
+        'agent "missing" not found'
+    )
+
+
+def test_current_opencode_jsonl_extracts_nested_text_and_usage() -> None:
+    events = [
+        {
+            "type": "text",
+            "part": {"type": "text", "text": "Repository analysis complete."},
+        },
+        {
+            "type": "step_finish",
+            "part": {
+                "type": "step-finish",
+                "cost": 0.125,
+                "tokens": {"input": 120, "output": 30, "reasoning": 10},
+            },
+        },
+    ]
+
+    assert _event_text_parts(events[0]) == ["Repository analysis complete."]
+    assert _event_usage(events) == (160, 0.125)

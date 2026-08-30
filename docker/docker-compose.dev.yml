@@ -31,9 +31,6 @@ services:
       NEXUSFORGE_OPENCODE_API_KEY: ${NEXUSFORGE_OPENCODE_API_KEY:-}
       OPENCODE_AUTH_JSON_B64: ${OPENCODE_AUTH_JSON_B64:-}
       NEXUSFORGE_AGENCY_AGENTS_PATH: /opt/agency-agents
-      GIT_CONFIG_COUNT: 1
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: "*"
     volumes:
       - ../packages:/app/packages
       # Paths must be mounted at the SAME absolute locations the Docker daemon
@@ -94,9 +91,6 @@ services:
       NEXUSFORGE_OPENCODE_API_KEY: ${NEXUSFORGE_OPENCODE_API_KEY:-}
       OPENCODE_AUTH_JSON_B64: ${OPENCODE_AUTH_JSON_B64:-}
       NEXUSFORGE_AGENCY_AGENTS_PATH: /opt/agency-agents
-      GIT_CONFIG_COUNT: 1
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: "*"
     volumes:
       - ../packages:/app/packages
       - ${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:${NEXUSFORGE_HOST_PROJECTS_ROOT:-/home/sunjeet/projects}:rw

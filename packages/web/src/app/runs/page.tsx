@@ -10,6 +10,7 @@ import {
   GitMerge,
   Loader2,
   MessageSquareText,
+  RotateCcw,
   ScrollText,
   ShieldCheck,
   Square,
@@ -32,7 +33,7 @@ const statusColor: Record<string, string> = {
   completed: "#4ade80", running: "#6ea1f0", failed: "#f06a6a", awaiting_review: "#b794f6",
   needs_review: "#b794f6", changes_requested: "#f0b44a", queued: "#f0b44a", pending: "#7b7b91", blocked: "#f06a6a",
 };
-const terminalStatuses = new Set(["completed", "failed", "cancelled", "awaiting_review", "needs_review"]);
+const terminalStatuses = new Set(["completed", "failed", "cancelled", "timeout", "awaiting_review", "needs_review"]);
 
 export default function RunsPage() {
   const [runs, setRuns] = useState<TaskRun[]>([]);
@@ -65,47 +66,84 @@ export default function RunsPage() {
     let active = true;
     let reconnectTimer = 0;
     let refreshTimer = 0;
+    let artifactRefreshTimer = 0;
     let controller: AbortController | null = null;
     let lastSequence = 0;
-    const load = async (): Promise<Detail | null> => {
+    let latestStatus = "";
+    let reconnectDelay = 1500;
+    let loadInFlight: Promise<Detail | null> | null = null;
+    let pendingArtifactRefresh = false;
+    const load = async (includeArtifacts = false): Promise<Detail | null> => {
+      if (loadInFlight) {
+        pendingArtifactRefresh ||= includeArtifacts;
+        return loadInFlight;
+      }
+      loadInFlight = (async () => {
       try {
-        const [nextDetail, nextArtifacts] = await Promise.all([
-          api<Detail>(`/api/v1/runs/${selected}/detail`),
-          api<Artifact[]>(`/api/v1/runs/${selected}/artifacts`),
-        ]);
+        const nextDetail = await api<Detail>(`/api/v1/runs/${selected}/detail`);
+        const nextArtifacts = includeArtifacts
+          ? await api<Artifact[]>(`/api/v1/runs/${selected}/artifacts`)
+          : null;
         if (!active) return null;
-        setDetail(nextDetail); setArtifacts(nextArtifacts); setError("");
+        latestStatus = nextDetail.status;
+        setDetail(nextDetail); setError("");
         lastSequence = Math.max(lastSequence, ...nextDetail.events.map((event) => event.sequence), 0);
-        setActiveArtifactId((current) => current && nextArtifacts.some((item) => item.id === current) ? current : [...nextArtifacts].reverse().find((item) => item.kind === "git_diff")?.id || nextArtifacts.at(-1)?.id || null);
+        if (nextArtifacts) {
+          setArtifacts(nextArtifacts);
+          setActiveArtifactId((current) => current && nextArtifacts.some((item) => item.id === current) ? current : [...nextArtifacts].reverse().find((item) => item.kind === "git_diff")?.id || nextArtifacts.at(-1)?.id || null);
+        }
         return nextDetail;
       } catch (reason) {
         if (active) setError(reason instanceof Error ? reason.message : "Unable to load run detail");
         return null;
       }
+      })();
+      try { return await loadInFlight; }
+      finally {
+        loadInFlight = null;
+        if (active && pendingArtifactRefresh) {
+          pendingArtifactRefresh = false;
+          window.clearTimeout(artifactRefreshTimer);
+          artifactRefreshTimer = window.setTimeout(() => { void load(true); }, 100);
+        }
+      }
     };
     const connect = async () => {
-      const current = await load();
-      if (!active || (current && terminalStatuses.has(current.status))) return;
+      if (!active || terminalStatuses.has(latestStatus)) return;
       controller = new AbortController();
+      let receivedEvent = false;
       try {
         await streamEvents(`/api/v1/runs/${selected}/events`, lastSequence, (event) => {
+          receivedEvent = true;
           lastSequence = Math.max(lastSequence, event.id);
           window.clearTimeout(refreshTimer);
-          refreshTimer = window.setTimeout(() => { void load(); }, 120);
+          refreshTimer = window.setTimeout(() => { void load(false); }, 750);
+          if (/artifact|step_completed|run_ready|merge/.test(event.type)) {
+            window.clearTimeout(artifactRefreshTimer);
+            artifactRefreshTimer = window.setTimeout(() => { void load(true); }, 1200);
+          }
         }, controller.signal);
       } catch (reason) {
         if (active && !(reason instanceof DOMException && reason.name === "AbortError")) {
           setError(reason instanceof Error ? `${reason.message}; reconnecting…` : "Event stream interrupted; reconnecting…");
         }
       }
-      if (active) reconnectTimer = window.setTimeout(() => { void connect(); }, 1500);
+      const current = active ? await load(true) : null;
+      if (!active || (current && terminalStatuses.has(current.status))) return;
+      reconnectDelay = receivedEvent ? 1500 : Math.min(reconnectDelay * 2, 30000);
+      reconnectTimer = window.setTimeout(() => { void connect(); }, reconnectDelay);
     };
-    setFeedback(""); void connect();
+    const start = async () => {
+      const initial = await load(true);
+      if (active && initial && !terminalStatuses.has(initial.status)) void connect();
+    };
+    setFeedback(""); void start();
     return () => {
       active = false;
       controller?.abort();
       window.clearTimeout(reconnectTimer);
       window.clearTimeout(refreshTimer);
+      window.clearTimeout(artifactRefreshTimer);
     };
   }, [selected]);
 
@@ -138,6 +176,7 @@ export default function RunsPage() {
   const activeArtifact = artifacts.find((artifact) => artifact.id === activeArtifactId);
   const output = detail?.output || {};
   const canStop = detail && ["planning", "queued", "pending", "running", "blocked", "awaiting_input"].includes(detail.status);
+  const canResume = detail?.run_kind === "agentic_task" && ["failed", "timeout"].includes(detail.status);
   const canReview = detail && ["awaiting_review", "needs_review"].includes(detail.status);
   const canMerge = detail?.status === "completed" && output.review?.decision === "approved" && output.merge?.status !== "merged";
 
@@ -165,7 +204,10 @@ export default function RunsPage() {
     <main className="run-main">
       <header className="run-commandbar">
         <div><div className="flex items-center gap-2"><span className={`badge ${detail?.status === "running" ? "blue" : canReview ? "purple" : detail?.status === "failed" ? "red" : ""}`}>{detail?.status?.replaceAll("_", " ") || "Select a run"}</span>{detail?.run_kind && <span className="badge">{detail.run_kind.replaceAll("_", " ")}</span>}</div><h2>{detail?.plan?.goal || runs.find((run) => run.id === selected)?.workflow || "Run mission control"}</h2><p className="font-mono">trace {detail?.trace_id?.slice(0, 16) || "—"} · {detail?.agents.length || 0} staffed agents · ${runs.find((run) => run.id === selected)?.cost_usd.toFixed(3) || "0.000"}</p></div>
-        <div className="flex gap-2">{canStop && <button className="btn" disabled={busy} onClick={() => action(`/api/v1/runs/${selected}/cancel`)}>{busy ? <Loader2 size={13} className="animate-spin" /> : <Square size={12} />} Stop</button>}</div>
+        <div className="flex gap-2">
+          {canResume && <button className="btn primary" disabled={busy} onClick={() => action(`/api/v1/runs/${selected}/resume`)}>{busy ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} Resume run</button>}
+          {canStop && <button className="btn" disabled={busy} onClick={() => action(`/api/v1/runs/${selected}/cancel`)}>{busy ? <Loader2 size={13} className="animate-spin" /> : <Square size={12} />} Stop</button>}
+        </div>
       </header>
       {error && <div className="error-state m-4">{error}</div>}
 

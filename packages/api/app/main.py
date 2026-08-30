@@ -103,8 +103,10 @@ def create_app() -> FastAPI:
     )
 
     app.add_middleware(SecurityHeadersMiddleware)  # type: ignore[arg-type]
-    app.add_middleware(RBACMiddleware)  # type: ignore[arg-type]
     app.add_middleware(RateLimitMiddleware)  # type: ignore[arg-type]
+    # RBAC must wrap rate limiting so authenticated requests are assigned to
+    # their user-scoped read, stream, and mutation buckets.
+    app.add_middleware(RBACMiddleware)  # type: ignore[arg-type]
     app.add_middleware(SecurityMiddleware)  # type: ignore[arg-type]
     app.add_middleware(AuditMiddleware)  # type: ignore[arg-type]
 

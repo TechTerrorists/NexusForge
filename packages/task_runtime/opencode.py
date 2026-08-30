@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -162,8 +163,23 @@ class OpenCodeRunner:
         event_sink: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> OpenCodeResult:
         configured_provider = bool(custom_provider and base_url and model)
-        selected_model = f"nexusforge/{model}" if configured_provider else model
-        command = [self.binary, "run", "--format", "json", "--dir", str(workdir)]
+        openrouter = configured_provider and self._is_openrouter(provider, base_url)
+        selected_model = (
+            f"openrouter/{self._openrouter_model_id(model)}"
+            if openrouter
+            else f"nexusforge/{model}" if configured_provider else model
+        )
+        command = [
+            self.binary,
+            "--print-logs",
+            "--log-level",
+            "ERROR",
+            "run",
+            "--format",
+            "json",
+            "--dir",
+            str(workdir),
+        ]
         if selected_model:
             command.extend(["--model", selected_model])
         if agent:
@@ -178,13 +194,17 @@ class OpenCodeRunner:
         if env_extras:
             safe_env.update(env_extras)
         if configured_provider and base_url and model:
-            safe_env["NEXUSFORGE_OPENCODE_API_KEY"] = api_key or "not-required"
-            safe_env["OPENCODE_CONFIG_CONTENT"] = self._provider_config(
-                provider=provider,
-                adapter=adapter,
-                base_url=base_url,
-                model=model,
-            )
+            if openrouter:
+                safe_env["OPENROUTER_API_KEY"] = api_key or ""
+                safe_env["OPENCODE_CONFIG_CONTENT"] = self._openrouter_config(model)
+            else:
+                safe_env["NEXUSFORGE_OPENCODE_API_KEY"] = api_key or "not-required"
+                safe_env["OPENCODE_CONFIG_CONTENT"] = self._provider_config(
+                    provider=provider,
+                    adapter=adapter,
+                    base_url=base_url,
+                    model=model,
+                )
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=workdir,
@@ -206,7 +226,7 @@ class OpenCodeRunner:
             await process.wait()
             raise
         if process.returncode:
-            raise RuntimeError(stderr[-2000:] or "OpenCode worker failed")
+            raise RuntimeError(self._failure_message("OpenCode worker", events, stderr))
         tokens_used, cost_usd = _event_usage(events)
         return OpenCodeResult(text="\n".join(text_parts).strip(), events=events, tokens_used=tokens_used, cost_usd=cost_usd)
 
@@ -237,32 +257,76 @@ class OpenCodeRunner:
             # Git worktree links contain an absolute gitdir. Mount only the
             # managed clone's metadata at that same path, never the source repo.
             command.extend(["-v", f"{common_git}:{common_git}:rw"])
-        command.extend(["-e", f"NEXUSFORGE_TASK_PROMPT={prompt}"])
+        docker_environment = os.environ.copy()
+        docker_environment["NEXUSFORGE_TASK_PROMPT"] = prompt
+        command.extend(["-e", "NEXUSFORGE_TASK_PROMPT"])
         for key in (
             "NEXUSFORGE_OPENCODE_API_KEY",
             "OPENCODE_AUTH_JSON_B64",
             "OPENCODE_CONFIG",
             "OPENCODE_SERVER_PASSWORD",
         ):
+            if custom_provider and key != "OPENCODE_SERVER_PASSWORD":
+                continue
             if value := os.getenv(key):
-                command.extend(["-e", f"{key}={value}"])
+                docker_environment[key] = value
+                command.extend(["-e", key])
         if env_extras:
             for key, value in env_extras.items():
-                command.extend(["-e", f"{key}={value}"])
+                docker_environment[key] = value
+                command.extend(["-e", key])
         if custom_provider and base_url and model:
-            command.extend(
-                ["-e", f"NEXUSFORGE_OPENCODE_API_KEY={api_key or 'not-required'}"]
-            )
-            command.extend(["-e", "NEXUSFORGE_PROVIDER_CONFIGURED=1"])
-            command.extend(["-e", f"OPENCODE_CONFIG_CONTENT={self._provider_config(provider=provider, adapter=adapter, base_url=base_url, model=model)}"])
-            command.extend(["-e", f"NEXUSFORGE_MODEL=nexusforge/{model}"])
+            if self._is_openrouter(provider, base_url):
+                openrouter_model = self._openrouter_model_id(model)
+                docker_environment["OPENROUTER_API_KEY"] = api_key or ""
+                docker_environment["OPENCODE_CONFIG_CONTENT"] = self._openrouter_config(
+                    openrouter_model
+                )
+                docker_environment["NEXUSFORGE_MODEL"] = f"openrouter/{openrouter_model}"
+                command.extend(
+                    [
+                        "-e",
+                        "OPENROUTER_API_KEY",
+                        "-e",
+                        "OPENCODE_CONFIG_CONTENT",
+                        "-e",
+                        "NEXUSFORGE_MODEL",
+                    ]
+                )
+            else:
+                docker_environment["NEXUSFORGE_OPENCODE_API_KEY"] = api_key or "not-required"
+                docker_environment["NEXUSFORGE_PROVIDER_CONFIGURED"] = "1"
+                docker_environment["OPENCODE_CONFIG_CONTENT"] = self._provider_config(
+                    provider=provider,
+                    adapter=adapter,
+                    base_url=base_url,
+                    model=model,
+                )
+                docker_environment["NEXUSFORGE_MODEL"] = f"nexusforge/{model}"
+                command.extend(
+                    [
+                        "-e",
+                        "NEXUSFORGE_OPENCODE_API_KEY",
+                        "-e",
+                        "NEXUSFORGE_PROVIDER_CONFIGURED",
+                        "-e",
+                        "OPENCODE_CONFIG_CONTENT",
+                        "-e",
+                        "NEXUSFORGE_MODEL",
+                    ]
+                )
         elif model:
-            command.extend(["-e", f"NEXUSFORGE_MODEL={model}"])
+            docker_environment["NEXUSFORGE_MODEL"] = model
+            command.extend(["-e", "NEXUSFORGE_MODEL"])
         if agent:
-            command.extend(["-e", f"NEXUSFORGE_AGENT={agent}"])
+            docker_environment["NEXUSFORGE_AGENT"] = agent
+            command.extend(["-e", "NEXUSFORGE_AGENT"])
         command.append(image)
         process = await asyncio.create_subprocess_exec(
-            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=docker_environment,
         )
         try:
             events, text_parts, stderr = await asyncio.wait_for(
@@ -278,7 +342,7 @@ class OpenCodeRunner:
             await process.wait()
             raise
         if process.returncode:
-            raise RuntimeError(stderr[-2000:] or "OpenCode sandbox failed")
+            raise RuntimeError(self._failure_message("OpenCode sandbox", events, stderr))
         tokens_used, cost_usd = _event_usage(events)
         return OpenCodeResult(text="\n".join(text_parts).strip(), events=events, tokens_used=tokens_used, cost_usd=cost_usd)
 
@@ -322,9 +386,7 @@ class OpenCodeRunner:
             events.append(event)
             if event_sink:
                 await event_sink(event)
-            content = event.get("text") or event.get("content")
-            if isinstance(content, str):
-                text_parts.append(content)
+            text_parts.extend(_event_text_parts(event))
         await process.wait()
         return events, text_parts, await stderr_task
 
@@ -354,9 +416,75 @@ class OpenCodeRunner:
             },
         })
 
+    @staticmethod
+    def _is_openrouter(provider: str | None, base_url: str | None) -> bool:
+        return "openrouter" in (provider or "").lower() or "openrouter.ai" in (
+            base_url or ""
+        ).lower()
+
+    @staticmethod
+    def _openrouter_config(model: str) -> str:
+        model = OpenCodeRunner._openrouter_model_id(model)
+        return json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "provider": {"openrouter": {"models": {model: {"name": model}}}},
+            }
+        )
+
+    @staticmethod
+    def _openrouter_model_id(model: str) -> str:
+        return model.removeprefix("openrouter/")
+
+    @staticmethod
+    def _failure_message(prefix: str, events: list[dict[str, Any]], stderr: str) -> str:
+        details: list[str] = []
+        for event in reversed(events):
+            if event.get("type") != "error":
+                continue
+            error = event.get("error")
+            if not isinstance(error, dict):
+                continue
+            data = error.get("data")
+            message = data.get("message") if isinstance(data, dict) else error.get("message")
+            reference = data.get("ref") if isinstance(data, dict) else None
+            if isinstance(message, str) and message:
+                details.append(message)
+            if isinstance(reference, str) and reference:
+                details.append(f"reference {reference}")
+            break
+        clean_stderr = _strip_ansi(stderr).strip()
+        if clean_stderr:
+            details.append(clean_stderr[-2000:])
+        return f"{prefix} failed" + (f": {'; '.join(details)}" if details else "")
+
 
 async def stream_container_events(*, image: str, worktree: Path, prompt_file: Path) -> AsyncIterator[dict]:
     yield {"event": "sandbox_prepared", "image": image, "worktree": str(worktree)}
+
+
+def _strip_ansi(value: str) -> str:
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+
+
+def _event_text_parts(event: dict[str, Any]) -> list[str]:
+    """Extract assistant text from both legacy and current OpenCode JSONL."""
+
+    values: list[Any] = [event.get("text"), event.get("content")]
+    part = event.get("part")
+    if isinstance(part, dict):
+        values.extend([part.get("text"), part.get("content")])
+    result: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value and value not in result:
+            result.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    text = item["text"]
+                    if text and text not in result:
+                        result.append(text)
+    return result
 
 
 def _response_cost(response: Any) -> float:
@@ -372,13 +500,30 @@ def _response_cost(response: Any) -> float:
 def _event_usage(events: list[dict[str, Any]]) -> tuple[int, float]:
     tokens, cost = 0, 0.0
     for event in events:
+        part = event.get("part")
         usage = event.get("usage")
-        candidates = [usage, event] if isinstance(usage, dict) else [event]
+        candidates = [event]
+        if isinstance(usage, dict):
+            candidates.append(usage)
+        if isinstance(part, dict):
+            candidates.append(part)
         for candidate in candidates:
             for key in ("total_tokens", "tokens_used", "tokens"):
                 value = candidate.get(key)
                 if isinstance(value, (int, float)):
                     tokens = max(tokens, int(value))
+                elif isinstance(value, dict):
+                    explicit_total = value.get("total") or value.get("total_tokens")
+                    if isinstance(explicit_total, (int, float)):
+                        tokens = max(tokens, int(explicit_total))
+                    else:
+                        token_total = sum(
+                            int(item)
+                            for name, item in value.items()
+                            if name in {"input", "output", "reasoning"}
+                            and isinstance(item, (int, float))
+                        )
+                        tokens = max(tokens, token_total)
             value = candidate.get("cost_usd", candidate.get("cost"))
             if isinstance(value, (int, float)):
                 cost = max(cost, float(value))
